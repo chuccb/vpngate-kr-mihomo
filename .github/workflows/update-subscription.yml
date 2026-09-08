@@ -58,6 +58,7 @@ jobs:
           proxies = cfg.get('proxies')
           groups = cfg.get('proxy-groups')
           rules = cfg.get('rules')
+          tun = cfg.get('tun')
           minimum = int(os.environ['MIN_PROXIES'])
 
           if not isinstance(proxies, list) or len(proxies) < minimum:
@@ -66,6 +67,16 @@ jobs:
               raise SystemExit('proxy-groups missing')
           if 'PROCESS-NAME,FreeStyleReboot.exe,KR-LOWEST' not in (rules or []):
               raise SystemExit('FreeStyle Reboot rule missing')
+          if not isinstance(tun, dict) or tun.get('enable') is not True:
+              raise SystemExit('TUN configuration missing/disabled')
+          if tun.get('stack') not in {'system', 'gvisor', 'mixed'}:
+              raise SystemExit(f"unsupported TUN stack: {tun.get('stack')}")
+
+          allowed_ciphers = {
+              'AES-128-GCM', 'AES-256-GCM', 'AES-128-CBC', 'AES-256-CBC', 'CHACHA20-POLY1305'
+          }
+          allowed_auth = {'MD5', 'SHA1', 'SHA256', 'SHA384', 'SHA512'}
+          allowed_comp = {'yes', 'no', 'adaptive'}
 
           names = []
           for proxy in proxies:
@@ -79,7 +90,45 @@ jobs:
               if not isinstance(name, str) or not name:
                   raise SystemExit('proxy name missing')
               names.append(name)
-              for field in ('ca', 'cert', 'key', 'tls-auth', 'tls-crypt'):
+
+              if ('username' in proxy or 'password' in proxy) and ('cert' in proxy or 'key' in proxy):
+                  raise SystemExit(f'mixed authentication modes: {name}')
+              if 'key' in proxy or 'cert' in proxy:
+                  raise SystemExit(f'private client certificate/key must not be published: {name}')
+              if 'tls-auth' in proxy and ('tls-crypt' in proxy or 'tls-crypt-v2' in proxy):
+                  raise SystemExit(f'mutually-exclusive TLS settings: {name}')
+              if 'tls-crypt' in proxy and 'tls-crypt-v2' in proxy:
+                  raise SystemExit(f'mutually-exclusive TLS crypt settings: {name}')
+              if 'tls-auth' in proxy and proxy.get('key-direction') not in {'0', '1'}:
+                  raise SystemExit(f'invalid key-direction: {name}')
+
+              cipher = proxy.get('cipher')
+              if cipher is not None and cipher == 'AES-CBC':
+                  cipher = 'AES-128-CBC'
+              if cipher is not None and cipher not in allowed_ciphers:
+                  raise SystemExit(f'unsupported OpenVPN cipher in Mihomo: {name}: {cipher}')
+
+              auth = proxy.get('auth')
+              if auth is not None and auth not in allowed_auth:
+                  raise SystemExit(f'unsupported OpenVPN auth in Mihomo: {name}: {auth}')
+
+              comp = proxy.get('comp-lzo')
+              if comp is not None and str(comp).lower() not in allowed_comp:
+                  raise SystemExit(f'unsupported comp-lzo in Mihomo: {name}: {comp}')
+
+              data_ciphers = proxy.get('data-ciphers')
+              if data_ciphers is not None:
+                  if not isinstance(data_ciphers, list) or not data_ciphers:
+                      raise SystemExit(f'invalid data-ciphers in Mihomo: {name}')
+                  bad = [x for x in data_ciphers if x not in allowed_ciphers]
+                  if bad:
+                      raise SystemExit(f'unsupported data-ciphers in Mihomo: {name}: {bad}')
+
+              fallback = proxy.get('data-ciphers-fallback')
+              if fallback is not None and fallback not in allowed_ciphers:
+                  raise SystemExit(f'unsupported data-ciphers-fallback: {name}: {fallback}')
+
+              for field in ('ca', 'cert', 'key', 'tls-auth', 'tls-crypt', 'tls-crypt-v2'):
                   value = proxy.get(field)
                   if isinstance(value, str) and 'BEGIN ' in value and '\n' not in value:
                       raise SystemExit(f'PEM newline corruption: {name}:{field}')
@@ -92,6 +141,10 @@ jobs:
               raise SystemExit('KR-LOWEST url-test group missing')
           if lowest.get('proxies') != names:
               raise SystemExit('KR-LOWEST proxy list does not match generated proxies')
+          if lowest.get('disable-udp') is not False:
+              raise SystemExit('KR-LOWEST must keep UDP enabled')
+          if lowest.get('expected-status') != 200:
+              raise SystemExit('unexpected health-check expected-status')
 
           print(f'validated proxies={len(proxies)}')
           PY
