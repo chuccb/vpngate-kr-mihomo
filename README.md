@@ -1,6 +1,6 @@
 # VPN Gate KR → Mihomo
 
-自動從 VPN Gate 官方 CSV API 取得 Korea Republic of 節點，直接解碼 API 提供的 `OpenVPN_ConfigData_Base64`，轉換成可供 Clash Verge Rev / Mihomo 使用的 YAML。
+自動從 VPN Gate 官方 CSV API 取得 Korea Republic of 節點，並結合官方 server table 的 UDP OpenVPN endpoint 資訊，產生可供 Clash Verge Rev / Mihomo 使用的 YAML。
 
 ## 訂閱檔
 
@@ -12,33 +12,42 @@
 
 ## 目前規則
 
-- 使用 VPN Gate 官方 CSV API：`https://www.vpngate.net/api/iphone/`
-- 不再依賴 HTML server table scraping
-- 直接使用官方 CSV 的 `OpenVPN_ConfigData_Base64`，不再逐台呼叫 `openvpn_download.aspx`
+- 以 VPN Gate 官方 CSV API：`https://www.vpngate.net/api/iphone/` 作為主要節點資料與排序來源
+- 以官方 server table：`https://www.vpngate.net/en/` 只補充 UDP OpenVPN 的正式下載 endpoint
 - `CountryLong = Korea Republic of` 且 `CountryShort = KR`
 - 官方 Ping **< 40 ms**（嚴格小於 40，不包含 40）
-- 只接受實際解析後的 **UDP OpenVPN** profile
+- 只接受實際解析後確認為 **UDP OpenVPN** 的 profile
 - **最多 10 個節點**
-- 先依官方 Ping 由低到高，再以 Speed、Score 作次要排序
-- 不是只檢查前 10 筆：會持續掃描候選，直到取得 10 個有效、可轉換的 UDP profile 或候選耗盡
+- 依官方 Ping 由低到高排序；Speed、Score 作次要排序
+- 不只是取前 10 筆：會持續檢查候選，直到取得 10 個有效 UDP profile 或候選耗盡
 - 去除重複的 OpenVPN `(server, port)` endpoint
 - 只保留一個 `KR-LOWEST` `url-test` 群組，不建立 `KR-SELECT`
 - `KR-LOWEST` 使用 `https://www.naver.com/` 做 Mihomo health-check
-- `tolerance: 0`，嚴格偏好最低 health-check 延遲
-- `lazy: true`，群組沒有被實際使用時不持續做背景 health-check
+- `tolerance: 0`，嚴格偏好最低測得延遲
+- `lazy: true`，群組未被實際使用時不持續做背景 health-check
 - `disable-udp: false`
 - `PROCESS-NAME,FreeStyleReboot.exe,KR-LOWEST`
 - TUN 預設 `stack: system`
 
-## 為什麼改用官方 CSV API
+## 為什麼使用「CSV + 官方 UDP endpoint」雙來源
 
-VPN Gate 的官方 CSV API 直接提供完整的伺服器資料與 `OpenVPN_ConfigData_Base64`。相較於解析 HTML 後再逐台拼接下載網址，直接使用 CSV API 的結構化資料更不依賴網頁版面，也少掉大量逐台 HTTP 請求。
+實際整合測試證明，VPN Gate CSV API 的 `OpenVPN_ConfigData_Base64` 並不代表該資料一定是 UDP profile；在實際某次更新中，符合 Korea + Ping < 40 ms 的 27 筆候選裡，多數 API profile 解碼後為 TCP，只有少數可直接作為 UDP 使用。
 
-這也讓節點選擇流程變得正確：先取得完整候選資料，再按 Ping 排序，逐個解碼並嚴格驗證 OpenVPN profile；某一個 profile 無效時，會自動跳過並繼續找下一個候選，不會因前面幾筆失敗而提早湊不滿 10 個節點。
+因此 v7.1 不再假設「CSV 有 OpenVPN profile」就等於「CSV 有 UDP OpenVPN」。現在的流程是：
+
+1. CSV API 提供 Korea 節點、Ping、Speed、Score 與 OpenVPN profile metadata。
+2. 先依官方 Ping / Speed / Score 排出候選順序。
+3. 若 CSV 的 `OpenVPN_ConfigData_Base64` 解碼後本身就是 UDP，直接使用，不再額外下載。
+4. 若 CSV profile 是 TCP 或無法直接使用，則從官方 server table 找同一 IP 的 UDP OpenVPN endpoint。
+5. 使用 VPN Gate 官方的 `openvpn_download.aspx` + `udp=1` 下載真正的 UDP `.ovpn`。
+6. 再次解析並驗證 profile，成功後才加入候選。
+7. 持續往下一個候選檢查，直到湊滿最多 10 個有效 UDP profile。
+
+這樣既以結構化 CSV 作為主要排序依據，又不會錯誤地把 TCP profile 當成 UDP 節點。
 
 ## OpenVPN profile 處理
 
-程式會保留官方 profile 的實際設定，而不是為了「看起來比較快」而強制改 cipher、auth、MTU 或其他傳輸參數。
+程式不會為了「理論上比較快」而任意修改 VPN Gate profile 的傳輸參數，而是盡可能保留官方 profile 的實際設定。
 
 支援並驗證：
 
@@ -52,17 +61,17 @@ VPN Gate 的官方 CSV API 直接提供完整的伺服器資料與 `OpenVPN_Conf
 - `data-ciphers-fallback`
 - `auth`
 - `comp-lzo`
-- 官方 profile 若提供 `ping`、`ping-restart`、`handshake-timeout`、`peer-info`，則保留
+- `ping`、`ping-restart`、`handshake-timeout`、`peer-info`
 
-VPN Gate 公開 profile 可能故意附帶共享／dummy client certificate/key。這種官方公開材料會依 profile 原樣保留；若 profile 使用 `auth-user-pass`，則使用 VPN Gate 公開的 `vpn / vpn` 認證模式，而且絕不與 cert/key 混用。
+VPN Gate 公開 profile 可能故意附帶共享／dummy client certificate/key。這類官方公開材料會依 profile 保留；若 profile 使用 `auth-user-pass`，則使用 VPN Gate 公開的 `vpn / vpn` 認證，而且絕不與 cert/key 混用。
 
 ## 延遲與排序的重要限制
 
-GitHub Actions 使用的是 VPN Gate 官方資料中的 Ping，因此 `<40ms` 是「VPN Gate 官方 Ping」，不是你的台灣電腦到該 VPN 節點的實際 RTT。
+GitHub Actions 使用的是 VPN Gate 官方 CSV 的 Ping，因此 `<40ms` 是「VPN Gate 官方 Ping」，不是台灣使用者到該 VPN 節點的實際 RTT。
 
-節點載入到 Mihomo 後，`KR-LOWEST` 才會使用你本機實際網路環境測試 `https://www.naver.com/`，並依 health-check 延遲選擇節點。因此產生時的 Ping 排序只是候選優先順序，真正使用時仍由 Mihomo 的本機測試結果決定。
+節點載入到 Mihomo 後，`KR-LOWEST` 才會在你的本機網路環境中對 `https://www.naver.com/` 做 health-check，並依實測延遲選擇節點。所以產生時的官方 Ping 只是候選優先順序，並不保證就是你實際遊戲內最低延遲。
 
-HTTP health-check 也不是 FreeStyle Reboot 遊戲伺服器的 UDP RTT，因此不能把 Naver health-check 延遲直接當成遊戲內 Ping。
+HTTP health-check 也不是 FreeStyle Reboot 的遊戲 UDP RTT，因此不能把 Naver 延遲直接當成遊戲 Ping。
 
 ## TUN / 遊戲設定
 
@@ -76,17 +85,17 @@ tun:
   auto-detect-interface: true
 ```
 
-`system` 沒有被當成絕對最快，而是作為這個專案的保守遊戲 UDP 預設。Mihomo 官方目前同時提供 `system`、`gvisor`、`mixed`，且文件指出多網卡環境可手動指定 outbound interface；因此若 Windows 上有多個虛擬網卡，最終生效設定應以 Clash Verge Rev 的 core configuration 為準。
+`system` 是目前針對 Windows 遊戲 UDP 路徑採用的保守預設，不宣稱它在所有環境都是絕對最快。Mihomo 目前也提供 `system`、`gvisor`、`mixed`；多網卡環境還可能需要在 Clash Verge Rev 的全域設定中手動指定 outbound interface。
 
 ## 自動更新
 
-GitHub Actions 每 6 小時重新抓取一次，並在 workflow 驗證成功後才替換訂閱檔。
+GitHub Actions 每 6 小時重新抓取一次。生成、YAML reload 與語意驗證全部成功後才會替換正式訂閱檔。
 
 Publish 階段保留 main 分支 race retry：若 push 因遠端分支短暫前進失敗，會重新同步 `origin/main` 並最多重試 3 次。
 
 ## 驗證
 
-產物會先經過 YAML reload 與語意驗證，包括：
+正式產物會先經過 YAML reload 與語意驗證，包括：
 
 - 節點數量 3～10
 - 所有節點為 UDP OpenVPN
@@ -98,6 +107,7 @@ Publish 階段保留 main 分支 race retry：若 push 因遠端分支短暫前�
 - 單一 `KR-LOWEST` 群組
 - `lazy: true`、`interval: 60`、`timeout: 3000`、`tolerance: 0`
 - FreeStyle Reboot process rule 存在
+- candidate metadata 的來源、版本、國家與 Ping 條件正確
 
 這是 YAML 與語意層驗證；目前沒有宣稱在 GitHub Actions 中啟動真實 Mihomo binary 做完整 boot/connect smoke test。
 
@@ -108,4 +118,4 @@ Publish 階段保留 main 分支 race retry：若 push 因遠端分支短暫前�
 - `source_candidates.json` 只保存節點 metadata，不保存完整 profile
 - 不混用 OpenVPN 的 username/password 與 cert/key 認證模式
 - 只處理 VPN Gate 官方公開 profile 材料
-- 生成與驗證失敗時不以失敗產物覆蓋既有訂閱
+- 生成或驗證失敗時不以失敗產物覆蓋既有訂閱
