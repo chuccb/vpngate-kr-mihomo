@@ -15,16 +15,16 @@ from urllib.parse import parse_qs, quote, urljoin, urlparse
 import requests
 import yaml
 
-SCRIPT_VERSION = "v6.0"
+SCRIPT_VERSION = "v6.1"
 API_URL = "https://www.vpngate.net/api/iphone/"
 HTML_URL = "https://www.vpngate.net/en/"
 OPENVPN_DOWNLOAD_URL = "https://www.vpngate.net/common/openvpn_download.aspx"
 DEFAULT_TEST_URL = "https://www.naver.com/"
 DEFAULT_EXPECTED_STATUS = "200"
-MAX_CSV_PING_MS = 45
+MAX_CSV_PING_MS = 40
 DEFAULT_MIN_SPEED = 0
 PUBLIC_SUBSCRIPTION = True
-USER_AGENT = "Mozilla/5.0 (compatible; VPNGate-KR-Mihomo/6.0)"
+USER_AGENT = "Mozilla/5.0 (compatible; VPNGate-KR-Mihomo/6.1)"
 
 
 class LiteralString(str):
@@ -141,7 +141,6 @@ def parse_official_server_page(html: str) -> list[dict[str, Any]]:
         )
         if not href:
             continue
-
         try:
             full_href = urljoin(HTML_URL, href)
             query = parse_qs(urlparse(full_href).query)
@@ -152,7 +151,6 @@ def parse_official_server_page(html: str) -> list[dict[str, Any]]:
             hid = query.get("hid", [""])[0]
         except (TypeError, ValueError):
             continue
-
         if not fqdn or not ip or not sid or not hid or udp_port <= 0:
             continue
 
@@ -312,19 +310,11 @@ def ovpn_to_mihomo(ovpn: str, name: str) -> dict[str, Any]:
         "udp": parsed["proto"] == "udp",
     }
 
-    # VPN Gate's official OpenVPN profile may intentionally contain its public
-    # dummy client certificate/key pair. Mihomo accepts cert/key as an alternative
-    # authentication mode. Preserve that official pair; do not mix it with
-    # username/password. If the profile uses auth-user-pass instead, use vpn/vpn.
+    # VPN Gate official OpenVPN profiles may intentionally contain a shared/dummy
+    # client certificate/key pair. Mihomo supports cert/key as an auth mode.
     if parsed["auth_user_pass"]:
-        if parsed["cert"] or parsed["key"]:
-            # The official profile can carry auxiliary dummy cert/key material.
-            # Credentials remain the authoritative authentication mode.
-            node["username"] = "vpn"
-            node["password"] = "vpn"
-        else:
-            node["username"] = "vpn"
-            node["password"] = "vpn"
+        node["username"] = "vpn"
+        node["password"] = "vpn"
     elif parsed["cert"] and parsed["key"]:
         node["cert"] = LiteralString(parsed["cert"])
         node["key"] = LiteralString(parsed["key"])
@@ -359,8 +349,8 @@ def validate_config(config: dict[str, Any], min_proxies: int) -> None:
         raise RuntimeError(
             f"generated proxy count {len(proxies) if isinstance(proxies, list) else 0} < required {min_proxies}"
         )
-    if not isinstance(groups, list) or not groups:
-        raise RuntimeError("missing proxy-groups")
+    if not isinstance(groups, list) or len(groups) != 1:
+        raise RuntimeError("expected exactly one proxy-group")
     if not isinstance(rules, list) or "PROCESS-NAME,FreeStyleReboot.exe,KR-LOWEST" not in rules:
         raise RuntimeError("expected FreeStyle Reboot routing rule missing")
 
@@ -425,7 +415,6 @@ def build_config(candidates: list[Candidate], out_path: Path) -> int:
                 "expected-status": 200,
                 "disable-udp": False,
             },
-            {"name": "KR-SELECT", "type": "select", "proxies": names + ["KR-LOWEST", "DIRECT"]},
         ],
         "rules": ["PROCESS-NAME,FreeStyleReboot.exe,KR-LOWEST", "MATCH,DIRECT"],
         "tun": {
@@ -510,7 +499,7 @@ def benchmark(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--min-speed", type=int, default=DEFAULT_MIN_SPEED)
     parser.add_argument("--out-dir", default="vpngate_kr_benchmark")
     parser.add_argument("--controller", default="")
