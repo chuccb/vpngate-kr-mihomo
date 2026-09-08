@@ -1,0 +1,114 @@
+name: Update VPN Gate KR Mihomo subscription
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+  push:
+    paths-ignore:
+      - 'vpngate_kr_mihomo.yaml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vpngate-kr-mihomo-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+
+      - name: Generate candidate configuration
+        run: |
+          rm -rf build
+          python vpngate_kr_mihomo_benchmark_v6.py --limit 20 --out-dir build
+
+      - name: Validate subscription before publishing
+        env:
+          MIN_PROXIES: '3'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import yaml
+
+          path = Path('build/vpngate_kr_mihomo.yaml')
+          if not path.is_file():
+              raise SystemExit('generated YAML does not exist')
+
+          text = path.read_text(encoding='utf-8')
+          cfg = yaml.safe_load(text)
+          if not isinstance(cfg, dict):
+              raise SystemExit('generated YAML root is not a mapping')
+
+          proxies = cfg.get('proxies')
+          groups = cfg.get('proxy-groups')
+          rules = cfg.get('rules')
+          minimum = int(os.environ['MIN_PROXIES'])
+
+          if not isinstance(proxies, list) or len(proxies) < minimum:
+              raise SystemExit(f'proxy count below safety threshold: {len(proxies) if isinstance(proxies, list) else 0} < {minimum}')
+          if not isinstance(groups, list) or not groups:
+              raise SystemExit('proxy-groups missing')
+          if 'PROCESS-NAME,FreeStyleReboot.exe,KR-LOWEST' not in (rules or []):
+              raise SystemExit('FreeStyle Reboot rule missing')
+
+          names = []
+          for proxy in proxies:
+              if not isinstance(proxy, dict):
+                  raise SystemExit('proxy entry is not a mapping')
+              if proxy.get('type') != 'openvpn':
+                  raise SystemExit(f"unexpected proxy type: {proxy.get('type')}")
+              if proxy.get('proto') != 'udp' or proxy.get('udp') is not True:
+                  raise SystemExit(f"non-UDP proxy emitted: {proxy.get('name')}")
+              name = proxy.get('name')
+              if not isinstance(name, str) or not name:
+                  raise SystemExit('proxy name missing')
+              names.append(name)
+              for field in ('ca', 'cert', 'key', 'tls-auth', 'tls-crypt'):
+                  value = proxy.get(field)
+                  if isinstance(value, str) and 'BEGIN ' in value and '\n' not in value:
+                      raise SystemExit(f'PEM newline corruption: {name}:{field}')
+
+          if len(names) != len(set(names)):
+              raise SystemExit('duplicate proxy names')
+
+          lowest = next((g for g in groups if isinstance(g, dict) and g.get('name') == 'KR-LOWEST'), None)
+          if not isinstance(lowest, dict) or lowest.get('type') != 'url-test':
+              raise SystemExit('KR-LOWEST url-test group missing')
+          if lowest.get('proxies') != names:
+              raise SystemExit('KR-LOWEST proxy list does not match generated proxies')
+
+          print(f'validated proxies={len(proxies)}')
+          PY
+
+      - name: Publish only after validation succeeds
+        run: |
+          cp build/vpngate_kr_mihomo.yaml vpngate_kr_mihomo.yaml
+          rm -rf build
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git add vpngate_kr_mihomo.yaml
+          if git diff --cached --quiet; then
+            echo 'Subscription unchanged; nothing to commit.'
+            exit 0
+          fi
+
+          git commit -m 'Update VPN Gate KR Mihomo subscription'
+          git push origin HEAD:main
