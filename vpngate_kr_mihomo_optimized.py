@@ -16,6 +16,8 @@ import vpngate_kr_mihomo_benchmark_v6 as base
 SCRIPT_VERSION = "v7.2"
 DEFAULT_WORKERS = 4
 DEFAULT_BATCH_SIZE = 8
+DEFAULT_TEST_URL = "http://www.gstatic.com/generate_204"
+DEFAULT_EXPECTED_STATUS = "204"
 _worker_local = threading.local()
 _worker_sessions: list[requests.Session] = []
 _worker_sessions_lock = threading.Lock()
@@ -151,12 +153,12 @@ def build_config_strict(
                 "name": "KR-LOWEST",
                 "type": "url-test",
                 "proxies": names,
-                "url": base.DEFAULT_TEST_URL,
+                "url": DEFAULT_TEST_URL,
                 "interval": 60,
                 "timeout": 3000,
                 "tolerance": 0,
                 "lazy": True,
-                "expected-status": 200,
+                "expected-status": int(DEFAULT_EXPECTED_STATUS),
                 "disable-udp": False,
             }
         ],
@@ -190,6 +192,8 @@ def write_metadata(out: Path, candidates: list[base.Candidate]) -> None:
                 "script_version": SCRIPT_VERSION,
                 "base_parser_version": base.SCRIPT_VERSION,
                 "ping_threshold_ms_exclusive": base.MAX_CSV_PING_MS,
+                "health_check_url": DEFAULT_TEST_URL,
+                "health_check_expected_status": int(DEFAULT_EXPECTED_STATUS),
                 "selected": [
                     {
                         "hostname": c.hostname,
@@ -219,8 +223,8 @@ def main() -> int:
     parser.add_argument("--out-dir", default="vpngate_kr_benchmark")
     parser.add_argument("--controller", default="")
     parser.add_argument("--secret", default="")
-    parser.add_argument("--url", default=base.DEFAULT_TEST_URL)
-    parser.add_argument("--expected-status", default=base.DEFAULT_EXPECTED_STATUS)
+    parser.add_argument("--url", default=DEFAULT_TEST_URL)
+    parser.add_argument("--expected-status", default=DEFAULT_EXPECTED_STATUS)
     parser.add_argument("--repeat", type=int, default=5)
     parser.add_argument("--timeout", type=int, default=5000)
     parser.add_argument("--pause", type=float, default=0.3)
@@ -236,6 +240,12 @@ def main() -> int:
         raise SystemExit("--workers must be between 1 and 16")
     if not 1 <= args.batch_size <= 32:
         raise SystemExit("--batch-size must be between 1 and 32")
+    try:
+        expected_status = int(args.expected_status)
+    except ValueError as exc:
+        raise SystemExit("--expected-status must be an integer HTTP status") from exc
+    if not 100 <= expected_status <= 599:
+        raise SystemExit("--expected-status must be between 100 and 599")
 
     main_session = new_session()
     out = Path(args.out_dir)
@@ -273,8 +283,6 @@ def main() -> int:
                 continue
             if args.min_speed and (speed is None or speed < args.min_speed):
                 continue
-            # The official server table is the UDP fallback when the CSV profile
-            # is absent, invalid, or TCP-only.
             eligible_rows.append(row)
 
         eligible_rows.sort(
@@ -320,7 +328,7 @@ def main() -> int:
             results = base.benchmark(
                 names, main_session, args.controller, args.url, args.repeat,
                 args.timeout, args.secret or None, args.pause,
-                args.expected_status or None,
+                str(expected_status),
             )
             (out / "benchmark_results.json").write_text(
                 json.dumps(results, ensure_ascii=False, indent=2) + "\n",
