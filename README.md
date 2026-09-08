@@ -21,18 +21,18 @@
 - 候選依官方 Ping → Speed → Score 排序
 - 去除重複 `(server, port)` UDP endpoint
 
-CSV 的 `OpenVPN_ConfigData_Base64` 不保證一定是 UDP，因此若 CSV profile 是 TCP、無法解析或不存在，會改從官方 server table 找同一 IP 的 UDP endpoint，再由官方 `openvpn_download.aspx` 下載 UDP profile。
+CSV 的 `OpenVPN_ConfigData_Base64` 不保證一定是 UDP；若 profile 是 TCP、無法解析或不存在，會改從官方 server table 找同一 IP 的 UDP endpoint，再下載真正的 UDP OpenVPN profile。
 
 ## v7.2 生成器優化
 
-`vpngate_kr_mihomo_optimized.py` 使用 v7.1 parser/validator 作為相容性基礎，主要優化候選取得與驗證流程：
+`vpngate_kr_mihomo_optimized.py` 保留 v7.1 parser/validator，主要優化候選取得與驗證：
 
 - 預設 4 個 worker、每批最多 8 筆
-- 每個 worker 擁有自己的 `requests.Session`，可重用 HTTP connection
-- 最多只處理填滿所需數量的候選，避免不必要下載
-- 平行結果會恢復原始候選優先順序後才做 endpoint 去重，避免「誰先完成誰被選中」造成選擇不穩定
-- YAML 輸出與 `source_candidates.json` 使用完全相同的最終 emitted 節點集合
-- 最終 Mihomo proxy 數不足安全下限時直接失敗
+- 每個 worker 重用自己的 `requests.Session`
+- 僅驗證填滿所需數量的候選，避免不必要下載
+- 平行完成順序不影響節點選擇：先恢復 Ping → Speed → Score 優先序，再做 endpoint 去重
+- YAML 與 metadata 只記錄真正成功轉換成 Mihomo proxy 的節點
+- 最終 proxy 數不足安全下限時直接失敗
 
 ## Clash Verge Rev / Mihomo 設定
 
@@ -46,12 +46,12 @@ unified-delay: true
 proxy-groups:
   - name: KR-LOWEST
     type: url-test
-    url: https://www.naver.com/
+    url: http://www.gstatic.com/generate_204
     interval: 60
     timeout: 3000
     tolerance: 0
     lazy: true
-    expected-status: 200
+    expected-status: 204
     disable-udp: false
 
 tun:
@@ -63,33 +63,29 @@ tun:
 
 `PROCESS-NAME,FreeStyleReboot.exe,KR-LOWEST` 用於讓 FreeStyle Reboot 對應到韓國最低延遲群組。
 
-Clash Verge Rev 官方文件指出：系統代理無法代理 UDP，而 TUN 會透過虛擬網卡接管不遵循系統代理的程式，例如遊戲。官方目前的 TUN 預設 stack 是 GVisor；本專案則刻意保留 `system` 作為 Windows 遊戲的保守預設，不宣稱所有環境下都比其他 stack 更快。
-
-Windows 使用 TUN 時，Clash Verge Rev 官方文件也提醒網卡/網段衝突與防火牆問題可能造成異常；服務模式可讓一般使用者啟動 TUN。
+Clash Verge Rev 使用 TUN 讓不遵循系統代理的程式（例如遊戲）進入 Mihomo 路由；本專案保留 `stack: system` 作為 Windows 遊戲的保守預設，不宣稱所有環境下都比其他 stack 更快。
 
 ## OpenVPN 相容性
 
-Mihomo 官方目前支援 `proto: udp`、`udp: true`、username/password 或 cert/key 二選一，以及 `tls-auth`、`tls-crypt`、`tls-crypt-v2`、`cipher`、`data-ciphers`、`data-ciphers-fallback`、`auth`、`comp-lzo` 等欄位。生成器盡可能保留 VPN Gate 原始 profile，不為了理論速度擅自改寫加密/傳輸參數。
+Mihomo OpenVPN 節點保留 VPN Gate 原始 profile 的傳輸與加密設定，不為了理論速度擅自改寫。認證模式、TLS 材料、cipher、data-ciphers、compression 等欄位都會先驗證再輸出。
 
 ## 延遲與遊戲的限制
 
 GitHub Actions 使用 VPN Gate 官方 CSV Ping，只用於候選篩選；它不是台灣使用者到節點的實際 RTT。
 
-`KR-LOWEST` 的 health-check 是 HTTP/HTTPS 延遲，也不是 FreeStyle Reboot 的遊戲 UDP RTT。它的目的只是讓 Mihomo 在你目前的網路環境中從候選節點裡選出較低延遲的節點。
+`KR-LOWEST` 使用 `http://www.gstatic.com/generate_204` 做 HTTP health-check，要求 HTTP **204**。這是用來讓 Mihomo 在你目前網路環境中選擇較低延遲的可用節點，不等同於 FreeStyle Reboot 的遊戲 UDP RTT。
 
-`url-test` 的 `lazy: true` 表示群組未被選用時不持續進行背景測試；`tolerance: 0` 則維持嚴格的最低延遲偏好。
+`lazy: true` 可避免未使用群組時持續進行背景測試；`tolerance: 0` 維持嚴格最低延遲偏好。
 
 ## CI / 發布
 
 GitHub Actions 每 6 小時更新一次，也支援手動執行。
 
-Pull Request 會先生成並驗證訂閱，但不發布到 `main`。
+Pull Request 只做生成與驗證，不發布到 `main`。正式流程通過全部驗證後才更新訂閱，並保留 push race retry。
 
-正式 `main` 流程在生成與驗證全部成功後才更新 `vpngate_kr_mihomo.yaml`，並保留 push race retry。
+CI 同時做 PyYAML 語意驗證，以及使用官方 Mihomo image 執行 `mihomo -t` 配置載入測試。
 
-CI 除了 PyYAML 語意驗證，還會使用官方 `metacubex/mihomo:v1.19.30` 容器實際執行 `mihomo -t` 檢查生成的配置語法。Mihomo 官方 release 目前可見 v1.19.30；v1.19.29 起已包含 OpenVPN data-ciphers / tls-crypt-v2 等相關能力。
-
-注意：CI 的 `-t` 是配置載入測試，不等同於在 GitHub runner 上建立 Windows TUN 並實際連線 VPN Gate；最終 Windows Clash Verge Rev 行為仍應以本機實測為準。
+`mihomo -t` 只驗證配置能被 core 載入，不等同於 GitHub runner 上建立 Windows TUN 或實際連線 VPN Gate。
 
 ## 安全與資料
 
