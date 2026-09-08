@@ -37,6 +37,22 @@ jobs:
           rm -rf build
           python vpngate_kr_mihomo_benchmark_v6.py --limit 10 --out-dir build
 
+          # url-test lazy mode is intentionally enabled: when KR-LOWEST is not
+          # actually selected by a matching process/rule, Mihomo does not keep
+          # spending traffic on background health checks. Once FreeStyle Reboot
+          # selects the group, health checks resume normally.
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('build/vpngate_kr_mihomo.yaml')
+          text = path.read_text(encoding='utf-8')
+          old = '  lazy: false\n'
+          new = '  lazy: true\n'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected exactly one lazy:false group setting, found {text.count(old)}')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+
       - name: Validate subscription before publishing
         env:
           MIN_PROXIES: '3'
@@ -153,8 +169,14 @@ jobs:
               raise SystemExit('unexpected health-check expected-status')
           if lowest.get('tolerance') != 0:
               raise SystemExit('KR-LOWEST tolerance must remain 0 for strict latency preference')
+          if lowest.get('lazy') is not True:
+              raise SystemExit('KR-LOWEST lazy health-check mode must be enabled')
+          if lowest.get('interval') != 60:
+              raise SystemExit('unexpected health-check interval')
+          if lowest.get('timeout') != 3000:
+              raise SystemExit('unexpected health-check timeout')
 
-          print(f'validated proxies={len(proxies)}; single group=KR-LOWEST; max=10; source Ping threshold=<40ms')
+          print(f'validated proxies={len(proxies)}; single group=KR-LOWEST; max=10; lazy=true; source Ping threshold=<40ms')
           PY
 
       - name: Publish only after validation succeeds
@@ -172,4 +194,22 @@ jobs:
           fi
 
           git commit -m 'Update VPN Gate KR Mihomo subscription'
-          git push origin HEAD:main
+
+          # The generated subscription itself is ignored by the push trigger,
+          # but this rebase/retry protects publishing from occasional races with
+          # another workflow run or a simultaneous main-branch commit.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "git push failed; rebasing onto current origin/main (attempt ${attempt}/3)"
+            git fetch origin main
+            git rebase origin/main || {
+              git rebase --abort || true
+              git reset --soft origin/main
+              git add vpngate_kr_mihomo.yaml
+              git commit -m 'Update VPN Gate KR Mihomo subscription'
+            }
+          done
+          echo 'failed to publish after 3 attempts'
+          exit 1
