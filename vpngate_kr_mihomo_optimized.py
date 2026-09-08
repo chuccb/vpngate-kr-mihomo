@@ -1,18 +1,9 @@
 #!/usr/bin/env python3
-"""Optimized VPN Gate KR -> Mihomo generator.
-
-The existing v7.1 parser/validator remains the compatibility source of truth.
-This runner improves execution without changing the generated Clash Verge/Mihomo
-policy: UDP-only OpenVPN, the same candidate ordering, and the same TUN/url-test
-settings are preserved.
-"""
 from __future__ import annotations
 
 import argparse
 import json
-import re
-import statistics
-import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -25,6 +16,10 @@ import vpngate_kr_mihomo_benchmark_v6 as base
 SCRIPT_VERSION = "v7.2"
 DEFAULT_WORKERS = 4
 DEFAULT_BATCH_SIZE = 8
+_worker_local = threading.local()
+_worker_sessions: list[requests.Session] = []
+_worker_sessions_lock = threading.Lock()
+_UDP_ENDPOINTS: dict[str, list[base.UDPEndpoint]] = {}
 
 
 def new_session() -> requests.Session:
@@ -33,44 +28,106 @@ def new_session() -> requests.Session:
     return session
 
 
-def validate_candidate(
-    row: dict[str, str],
-    udp_endpoints: dict[str, list[base.UDPEndpoint]],
-) -> tuple[base.Candidate | None, str | None]:
-    """Validate one CSV row in an isolated HTTP session.
+def worker_session() -> requests.Session:
+    session = getattr(_worker_local, "session", None)
+    if session is None:
+        session = new_session()
+        _worker_local.session = session
+        with _worker_sessions_lock:
+            _worker_sessions.append(session)
+    return session
 
-    requests.Session is intentionally not shared across worker threads.
-    """
-    session = new_session()
-    try:
-        return base.candidate_from_row(row, session, udp_endpoints), None
-    except Exception as exc:  # candidate rejection must not abort the batch
-        return None, str(exc)
-    finally:
+
+def close_worker_sessions() -> None:
+    with _worker_sessions_lock:
+        sessions = list(_worker_sessions)
+        _worker_sessions.clear()
+    for session in sessions:
         session.close()
 
 
-def build_config_strict(candidates: list[base.Candidate], out_path: Path) -> tuple[int, list[base.Candidate]]:
-    """Build config while making emitted-candidate accounting exact.
+def validate_candidate(row: dict[str, str]) -> tuple[base.Candidate | None, str | None]:
+    try:
+        return base.candidate_from_row(row, worker_session(), _UDP_ENDPOINTS), None
+    except Exception as exc:
+        return None, str(exc)
 
-    v7.1 records source metadata before build-time conversion. If a later
-    conversion were to fail, metadata and proxy count could diverge. We instead
-    preflight every candidate with the exact same converter and only emit the
-    candidates that can actually become Mihomo proxies.
-    """
+
+def endpoint_key(candidate: base.Candidate) -> tuple[str, int]:
+    parsed = base.parse_ovpn(candidate.ovpn)
+    return base._safe_server(parsed["server"]).lower(), candidate.udp_port
+
+
+def candidate_order_key(candidate: base.Candidate) -> tuple[Any, ...]:
+    return base._candidate_sort_key(candidate)
+
+
+def collect_candidates(
+    eligible_rows: list[dict[str, str]],
+    udp_endpoints: dict[str, list[base.UDPEndpoint]],
+    limit: int,
+    workers: int,
+    batch_size: int,
+) -> tuple[list[base.Candidate], int]:
+    global _UDP_ENDPOINTS
+    _UDP_ENDPOINTS = udp_endpoints
+
+    candidates: list[base.Candidate] = []
+    seen_endpoints: set[tuple[str, int]] = set()
+    invalid_profiles = 0
+    cursor = 0
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="vpngate") as pool:
+        while cursor < len(eligible_rows) and len(candidates) < limit:
+            remaining = limit - len(candidates)
+            batch_len = min(batch_size, remaining, len(eligible_rows) - cursor)
+            batch = eligible_rows[cursor : cursor + batch_len]
+            cursor += batch_len
+
+            futures = {
+                pool.submit(validate_candidate, row): (index, row)
+                for index, row in enumerate(batch)
+            }
+            batch_candidates: list[tuple[int, base.Candidate]] = []
+            for future in as_completed(futures):
+                index, row = futures[future]
+                candidate, error = future.result()
+                if candidate is None:
+                    invalid_profiles += 1
+                    print(f"[skip] {row.get('HostName') or row.get('IP') or 'unknown'}: {error}")
+                    continue
+                batch_candidates.append((index, candidate))
+
+            # Restore source priority before endpoint de-duplication. Completion
+            # order must never decide which duplicate endpoint wins.
+            batch_candidates.sort(key=lambda item: (candidate_order_key(item[1]), item[0]))
+            for _, candidate in batch_candidates:
+                endpoint = endpoint_key(candidate)
+                if endpoint in seen_endpoints:
+                    print(f"[skip] {candidate.hostname or candidate.ip}: duplicate UDP endpoint")
+                    continue
+                seen_endpoints.add(endpoint)
+                candidates.append(candidate)
+                if len(candidates) >= limit:
+                    break
+
+    candidates.sort(key=candidate_order_key)
+    return candidates[:limit], invalid_profiles
+
+
+def build_config_strict(
+    candidates: list[base.Candidate],
+    out_path: Path,
+) -> tuple[int, list[base.Candidate]]:
     proxies: list[dict[str, Any]] = []
     names: list[str] = []
     emitted: list[base.Candidate] = []
     seen_endpoints: set[tuple[str, int]] = set()
 
     for candidate in candidates:
-        endpoint = (
-            base._safe_server(base.parse_ovpn(candidate.ovpn)["server"]).lower(),
-            candidate.udp_port,
-        )
+        endpoint = endpoint_key(candidate)
         if endpoint in seen_endpoints:
             continue
-
         index = len(proxies) + 1
         clean = base.clean_name(candidate.hostname or candidate.ip.replace(".", "-"))
         name = f"KR-{index:02d}-{clean}"
@@ -79,7 +136,6 @@ def build_config_strict(candidates: list[base.Candidate], out_path: Path) -> tup
         except Exception as exc:
             print(f"[skip-config] {candidate.hostname or candidate.ip}: {exc}")
             continue
-
         seen_endpoints.add(endpoint)
         proxies.append(proxy)
         names.append(name)
@@ -87,6 +143,7 @@ def build_config_strict(candidates: list[base.Candidate], out_path: Path) -> tup
 
     config = {
         "mode": "rule",
+        "find-process-mode": "strict",
         "unified-delay": True,
         "proxies": proxies,
         "proxy-groups": [
@@ -124,53 +181,8 @@ def build_config_strict(candidates: list[base.Candidate], out_path: Path) -> tup
     return len(proxies), emitted
 
 
-def collect_candidates(
-    eligible_rows: list[dict[str, str]],
-    udp_endpoints: dict[str, list[base.UDPEndpoint]],
-    limit: int,
-    workers: int,
-    batch_size: int,
-) -> tuple[list[base.Candidate], int]:
-    candidates: list[base.Candidate] = []
-    seen_endpoints: set[tuple[str, int]] = set()
-    invalid_profiles = 0
-    cursor = 0
-
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="vpngate") as pool:
-        while cursor < len(eligible_rows) and len(candidates) < limit:
-            batch = eligible_rows[cursor : cursor + batch_size]
-            cursor += len(batch)
-            futures = {
-                pool.submit(validate_candidate, row, udp_endpoints): row
-                for row in batch
-            }
-            batch_candidates: list[base.Candidate] = []
-            for future in as_completed(futures):
-                row = futures[future]
-                candidate, error = future.result()
-                if candidate is None:
-                    invalid_profiles += 1
-                    print(f"[skip] {row.get('HostName') or row.get('IP') or 'unknown'}: {error}")
-                    continue
-                endpoint = (
-                    base._safe_server(base.parse_ovpn(candidate.ovpn)["server"]).lower(),
-                    candidate.udp_port,
-                )
-                if endpoint in seen_endpoints:
-                    print(f"[skip] {candidate.hostname or candidate.ip}: duplicate UDP endpoint")
-                    continue
-                seen_endpoints.add(endpoint)
-                batch_candidates.append(candidate)
-
-            candidates.extend(batch_candidates)
-
-    candidates.sort(key=base._candidate_sort_key)
-    return candidates[:limit], invalid_profiles
-
-
 def write_metadata(out: Path, candidates: list[base.Candidate]) -> None:
-    path = out / "source_candidates.json"
-    path.write_text(
+    (out / "source_candidates.json").write_text(
         json.dumps(
             {
                 "source_api": base.API_URL,
@@ -200,30 +212,6 @@ def write_metadata(out: Path, candidates: list[base.Candidate]) -> None:
     )
 
 
-def benchmark(
-    names: list[str],
-    session: requests.Session,
-    controller: str,
-    url: str,
-    repeat: int,
-    timeout_ms: int,
-    secret: str | None,
-    pause: float,
-    expected_status: str | None,
-) -> list[dict[str, Any]]:
-    return base.benchmark(
-        names,
-        session,
-        controller,
-        url,
-        repeat,
-        timeout_ms,
-        secret,
-        pause,
-        expected_status,
-    )
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=base.MAX_PROXIES)
@@ -249,121 +237,107 @@ def main() -> int:
     if not 1 <= args.batch_size <= 32:
         raise SystemExit("--batch-size must be between 1 and 32")
 
-    session = new_session()
+    main_session = new_session()
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    print("[1/4] Downloading VPN Gate official CSV API...")
-    csv_response = base._request(
-        session,
-        base.API_URL,
-        accept="text/csv,text/plain;q=0.9,*/*;q=0.8",
-    )
-    rows = base.parse_official_csv(csv_response.text)
-    print(f"        API rows: {len(rows)}")
-
-    print("[2/4] Discovering official UDP OpenVPN endpoints...")
-    html_response = base._request(
-        session,
-        base.HTML_URL,
-        accept="text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-    )
-    udp_endpoints = base.parse_official_udp_endpoints(html_response.text)
-    print(f"        Korea IPs with UDP OpenVPN endpoint(s): {len(udp_endpoints)}")
-
-    kr_rows = [
-        row
-        for row in rows
-        if row.get("CountryShort", "").strip().upper() == "KR"
-        and row.get("CountryLong", "").strip().lower() == "korea republic of"
-    ]
-    print(f"        Korea Republic of CSV rows: {len(kr_rows)}")
-
-    eligible_rows: list[dict[str, str]] = []
-    for row in kr_rows:
-        ping = base._int_field(row.get("Ping"), default=None)
-        speed = base._int_field(row.get("Speed"), default=None)
-        if ping is None or not 0 <= ping < base.MAX_CSV_PING_MS:
-            continue
-        if args.min_speed and (speed is None or speed < args.min_speed):
-            continue
-        # Do not require CSV OpenVPN_ConfigData_Base64 here. The official server
-        # table is already our fallback source for a real UDP profile.
-        eligible_rows.append(row)
-
-    eligible_rows.sort(
-        key=lambda row: (
-            base._int_field(row.get("Ping"), default=10**9),
-            -(base._int_field(row.get("Speed"), default=0) or 0),
-            -(base._int_field(row.get("Score"), default=0) or 0),
-            row.get("HostName", "").lower(),
-            row.get("IP", ""),
+    try:
+        print("[1/4] Downloading VPN Gate official CSV API...")
+        csv_response = base._request(
+            main_session, base.API_URL,
+            accept="text/csv,text/plain;q=0.9,*/*;q=0.8",
         )
-    )
-    print(f"        KR + Ping < {base.MAX_CSV_PING_MS} ms + speed filter: {len(eligible_rows)}")
-    print(f"        parallel UDP validation: workers={args.workers}, batch={args.batch_size}")
+        rows = base.parse_official_csv(csv_response.text)
+        print(f"        API rows: {len(rows)}")
 
-    candidates, invalid_profiles = collect_candidates(
-        eligible_rows,
-        udp_endpoints,
-        args.limit,
-        args.workers,
-        args.batch_size,
-    )
-    if len(candidates) < min(args.limit, base.MIN_PROXIES):
-        raise RuntimeError(
-            f"only {len(candidates)} valid UDP OpenVPN candidates remain; "
-            f"required at least {min(args.limit, base.MIN_PROXIES)}"
+        print("[2/4] Discovering official UDP OpenVPN endpoints...")
+        html_response = base._request(
+            main_session, base.HTML_URL,
+            accept="text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
         )
+        udp_endpoints = base.parse_official_udp_endpoints(html_response.text)
+        print(f"        Korea IPs with UDP OpenVPN endpoint(s): {len(udp_endpoints)}")
 
-    print(f"        valid UDP OpenVPN profiles: {len(candidates)}")
-    print(f"        rejected/invalid profiles: {invalid_profiles}")
-    print(f"        selected: {len(candidates)}")
+        kr_rows = [
+            row for row in rows
+            if row.get("CountryShort", "").strip().upper() == "KR"
+            and row.get("CountryLong", "").strip().lower() == "korea republic of"
+        ]
+        print(f"        Korea Republic of CSV rows: {len(kr_rows)}")
 
-    yaml_path = out / "vpngate_kr_mihomo.yaml"
-    count, emitted = build_config_strict(candidates, yaml_path)
-    if count < min(args.limit, base.MIN_PROXIES):
-        raise RuntimeError(
-            f"only {count} Mihomo proxies were emitted after final conversion; "
-            f"required at least {min(args.limit, base.MIN_PROXIES)}"
-        )
+        eligible_rows: list[dict[str, str]] = []
+        for row in kr_rows:
+            ping = base._int_field(row.get("Ping"), default=None)
+            speed = base._int_field(row.get("Speed"), default=None)
+            if ping is None or not 0 <= ping < base.MAX_CSV_PING_MS:
+                continue
+            if args.min_speed and (speed is None or speed < args.min_speed):
+                continue
+            # The official server table is the UDP fallback when the CSV profile
+            # is absent, invalid, or TCP-only.
+            eligible_rows.append(row)
 
-    # Metadata is written only after final conversion, so it can never silently
-    # claim nodes that were rejected during YAML generation.
-    write_metadata(out, emitted)
-    print(f"        generated: {yaml_path}")
-    print(f"        YAML proxies: {count}")
-
-    if args.controller:
-        print("[4/4] Benchmarking through Mihomo /delay...")
-        cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
-        names = [proxy["name"] for proxy in cfg["proxies"]]
-        results = benchmark(
-            names,
-            session,
-            args.controller,
-            args.url,
-            args.repeat,
-            args.timeout,
-            args.secret or None,
-            args.pause,
-            args.expected_status or None,
-        )
-        (out / "benchmark_results.json").write_text(
-            json.dumps(results, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        for index, result in enumerate(results, 1):
-            print(
-                f"{index:>2}. {result['name']:<42} "
-                f"avg={result['avg_ms']} min={result['min_ms']} max={result['max_ms']} "
-                f"jitter={result['jitter_ms']} timeout={result['timeouts']}"
+        eligible_rows.sort(
+            key=lambda row: (
+                base._int_field(row.get("Ping"), default=10**9),
+                -(base._int_field(row.get("Speed"), default=0) or 0),
+                -(base._int_field(row.get("Score"), default=0) or 0),
+                row.get("HostName", "").lower(),
+                row.get("IP", ""),
             )
-    else:
-        print("[4/4] Live benchmark not requested.")
+        )
+        print(f"        KR + Ping < {base.MAX_CSV_PING_MS} ms + speed filter: {len(eligible_rows)}")
+        print(f"        parallel UDP validation: workers={args.workers}, batch={args.batch_size}")
 
-    session.close()
-    return 0
+        candidates, invalid_profiles = collect_candidates(
+            eligible_rows, udp_endpoints, args.limit, args.workers, args.batch_size
+        )
+        if len(candidates) < min(args.limit, base.MIN_PROXIES):
+            raise RuntimeError(
+                f"only {len(candidates)} valid UDP OpenVPN candidates remain; "
+                f"required at least {min(args.limit, base.MIN_PROXIES)}"
+            )
+
+        print(f"        valid UDP OpenVPN profiles: {len(candidates)}")
+        print(f"        rejected/invalid profiles: {invalid_profiles}")
+        print(f"        selected: {len(candidates)}")
+
+        yaml_path = out / "vpngate_kr_mihomo.yaml"
+        count, emitted = build_config_strict(candidates, yaml_path)
+        if count < min(args.limit, base.MIN_PROXIES):
+            raise RuntimeError(
+                f"only {count} Mihomo proxies were emitted after final conversion; "
+                f"required at least {min(args.limit, base.MIN_PROXIES)}"
+            )
+        write_metadata(out, emitted)
+        print(f"        generated: {yaml_path}")
+        print(f"        YAML proxies: {count}")
+
+        if args.controller:
+            print("[4/4] Benchmarking through Mihomo /delay...")
+            cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+            names = [proxy["name"] for proxy in cfg["proxies"]]
+            results = base.benchmark(
+                names, main_session, args.controller, args.url, args.repeat,
+                args.timeout, args.secret or None, args.pause,
+                args.expected_status or None,
+            )
+            (out / "benchmark_results.json").write_text(
+                json.dumps(results, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            for index, result in enumerate(results, 1):
+                print(
+                    f"{index:>2}. {result['name']:<42} "
+                    f"avg={result['avg_ms']} min={result['min_ms']} max={result['max_ms']} "
+                    f"jitter={result['jitter_ms']} timeout={result['timeouts']}"
+                )
+        else:
+            print("[4/4] Live benchmark not requested.")
+        return 0
+    finally:
+        main_session.close()
+        close_worker_sessions()
 
 
 if __name__ == "__main__":
