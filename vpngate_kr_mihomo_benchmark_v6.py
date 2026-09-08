@@ -114,9 +114,9 @@ def _request(
     last: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
-            r = session.get(url, params=params, timeout=timeout)
-            r.raise_for_status()
-            return r
+            response = session.get(url, params=params, timeout=timeout)
+            response.raise_for_status()
+            return response
         except (requests.RequestException, OSError) as exc:
             last = exc
             if attempt < attempts:
@@ -129,43 +129,47 @@ def parse_official_server_page(html: str) -> list[dict[str, Any]]:
     parser.feed(html)
     result: list[dict[str, Any]] = []
     for row in parser.rows:
-        row_text = " ".join(_cell_text(c) for c in row)
+        row_text = " ".join(_cell_text(cell) for cell in row)
         if not re.search(r"\bKorea Republic of\b", row_text, re.I):
             continue
-        pm = re.search(r"\bPing:\s*(\d+)\s*ms\b", row_text, re.I)
-        if not pm:
+        ping_match = re.search(r"\bPing:\s*(\d+)\s*ms\b", row_text, re.I)
+        if not ping_match:
             continue
         href = next(
-            (h for c in row for h in c["hrefs"] if "do_openvpn.aspx?" in h.lower()),
+            (href for cell in row for href in cell["hrefs"] if "do_openvpn.aspx?" in href.lower()),
             None,
         )
         if not href:
             continue
+
         full_href = urljoin(HTML_URL, href)
-        q = parse_qs(urlparse(full_href).query)
-        fqdn = q.get("fqdn", [""])[0]
-        ip = q.get("ip", [""])[0]
-        udp_port = int(q.get("udp", ["0"])[0] or 0)
-        sid = q.get("sid", [""])[0]
-        hid = q.get("hid", [""])[0]
+        query = parse_qs(urlparse(full_href).query)
+        fqdn = query.get("fqdn", [""])[0]
+        ip = query.get("ip", [""])[0]
+        udp_port = int(query.get("udp", ["0"])[0] or 0)
+        sid = query.get("sid", [""])[0]
+        hid = query.get("hid", [""])[0]
         if not fqdn or not ip or not sid or not hid or udp_port <= 0:
             continue
-        sm = re.search(r"\b([\d.,]+)\s*Mbps\b", row_text, re.I)
+
         speed_bps = None
-        if sm:
+        speed_match = re.search(r"\b([\d.,]+)\s*Mbps\b", row_text, re.I)
+        if speed_match:
             try:
-                speed_bps = int(float(sm.group(1).replace(",", "")) * 1_000_000)
+                speed_bps = int(float(speed_match.group(1).replace(",", "")) * 1_000_000)
             except ValueError:
                 pass
+
         score = None
-        score_m = re.search(r"\bScore\s*:?\s*([0-9][0-9,]*)\b", row_text, re.I)
-        if score_m:
-            score = int(score_m.group(1).replace(",", ""))
+        score_match = re.search(r"\bScore\s*:?\s*([0-9][0-9,]*)\b", row_text, re.I)
+        if score_match:
+            score = int(score_match.group(1).replace(",", ""))
+
         hostname = fqdn[:-len(".opengw.net")] if fqdn.lower().endswith(".opengw.net") else fqdn
         result.append({
             "hostname": hostname,
             "ip": ip,
-            "ping": int(pm.group(1)),
+            "ping": int(ping_match.group(1)),
             "speed_bps": speed_bps,
             "score": score,
             "udp_port": udp_port,
@@ -177,9 +181,9 @@ def parse_official_server_page(html: str) -> list[dict[str, Any]]:
 
 def detect_openvpn_proto(text: str) -> str:
     global_proto = "udp"
-    remotes: list[str] = []
-    for raw in text.splitlines():
-        line = re.split(r"[#;]", raw, maxsplit=1)[0].strip()
+    remote_protos: list[str] = []
+    for raw_line in text.splitlines():
+        line = re.split(r"[#;]", raw_line, maxsplit=1)[0].strip()
         if not line:
             continue
         fields = line.split()
@@ -187,9 +191,9 @@ def detect_openvpn_proto(text: str) -> str:
         if directive == "proto" and len(fields) >= 2:
             global_proto = fields[1].lower()
         elif directive == "remote" and len(fields) >= 4:
-            remotes.append(fields[3].lower())
+            remote_protos.append(fields[3].lower())
 
-    def norm(proto: str) -> str:
+    def normalize(proto: str) -> str:
         if proto in {"udp", "udp4", "udp6"}:
             return "udp"
         if proto in {
@@ -200,15 +204,15 @@ def detect_openvpn_proto(text: str) -> str:
             return "tcp"
         raise ValueError(f"unsupported OpenVPN proto: {proto}")
 
-    gp = norm(global_proto)
-    rp = [norm(x) for x in remotes]
-    return "tcp" if gp == "tcp" or "tcp" in rp else "udp"
+    normalized_global = normalize(global_proto)
+    normalized_remotes = [normalize(proto) for proto in remote_protos]
+    return "tcp" if normalized_global == "tcp" or "tcp" in normalized_remotes else "udp"
 
 
 def parse_ovpn(text: str) -> dict[str, Any]:
     remotes: list[tuple[str, int, str | None]] = []
-    for raw in text.splitlines():
-        line = re.split(r"[#;]", raw, maxsplit=1)[0].strip()
+    for raw_line in text.splitlines():
+        line = re.split(r"[#;]", raw_line, maxsplit=1)[0].strip()
         if not line:
             continue
         fields = line.split()
@@ -220,41 +224,41 @@ def parse_ovpn(text: str) -> dict[str, Any]:
         raise ValueError("missing OpenVPN remote")
 
     def scalar(name: str) -> str | None:
-        for raw in text.splitlines():
-            line = re.split(r"[#;]", raw, maxsplit=1)[0].strip()
+        for raw_line in text.splitlines():
+            line = re.split(r"[#;]", raw_line, maxsplit=1)[0].strip()
             fields = line.split(None, 1)
             if len(fields) >= 2 and fields[0].lower() == name.lower():
                 return fields[1].strip()
         return None
 
     def block(tag: str) -> str | None:
-        m = re.search(rf"<{tag}>\s*(.*?)\s*</{tag}>", text, re.I | re.S)
-        return m.group(1).strip() if m else None
+        match = re.search(rf"<{tag}>\s*(.*?)\s*</{tag}>", text, re.I | re.S)
+        return match.group(1).strip() if match else None
 
     ca = block("ca")
-    ca_m = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", ca or "", re.S)
-    if not ca_m:
+    ca_match = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", ca or "", re.S)
+    if not ca_match:
         raise ValueError("missing/invalid <ca>")
 
     cert = block("cert")
-    cert_m = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", cert or "", re.S)
+    cert_match = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", cert or "", re.S)
 
     key = block("key")
-    key_m = re.search(
+    key_match = re.search(
         r"-----BEGIN (?:RSA )?PRIVATE KEY-----.*?-----END (?:RSA )?PRIVATE KEY-----",
         key or "",
         re.S,
     )
-    if not key_m:
-        key_m = re.search(r"-----BEGIN EC PRIVATE KEY-----.*?-----END EC PRIVATE KEY-----", key or "", re.S)
+    if not key_match:
+        key_match = re.search(r"-----BEGIN EC PRIVATE KEY-----.*?-----END EC PRIVATE KEY-----", key or "", re.S)
 
     tls_auth = block("tls-auth")
     tls_crypt = block("tls-crypt")
     tls_crypt_v2 = block("tls-crypt-v2")
     if tls_auth and (tls_crypt or tls_crypt_v2):
-        raise ValueError("OpenVPN profile contains mutually-exclusive tls-auth and TLS crypt directives")
+        raise ValueError("OpenVPN profile contains mutually-exclusive TLS directives")
     if tls_crypt and tls_crypt_v2:
-        raise ValueError("OpenVPN profile contains mutually-exclusive tls-crypt and tls-crypt-v2")
+        raise ValueError("OpenVPN profile contains mutually-exclusive tls-crypt modes")
 
     key_direction = scalar("key-direction")
     if tls_auth and key_direction not in {"0", "1"}:
@@ -264,9 +268,9 @@ def parse_ovpn(text: str) -> dict[str, Any]:
         "server": remotes[0][0],
         "port": remotes[0][1],
         "proto": detect_openvpn_proto(text),
-        "ca": ca_m.group(0).strip(),
-        "cert": cert_m.group(0).strip() if cert_m else None,
-        "key": key_m.group(0).strip() if key_m else None,
+        "ca": ca_match.group(0).strip(),
+        "cert": cert_match.group(0).strip() if cert_match else None,
+        "key": key_match.group(0).strip() if key_match else None,
         "tls_auth": tls_auth,
         "tls_crypt": tls_crypt,
         "tls_crypt_v2": tls_crypt_v2,
@@ -280,49 +284,57 @@ def parse_ovpn(text: str) -> dict[str, Any]:
     }
 
 
-def clean_name(s: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "-", s.strip()).strip("-")[:60] or "node"
+def clean_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-")[:60] or "node"
 
 
 def ovpn_to_mihomo(ovpn: str, name: str) -> dict[str, Any]:
-    p = parse_ovpn(ovpn)
+    parsed = parse_ovpn(ovpn)
     node: dict[str, Any] = {
         "name": name,
         "type": "openvpn",
-        "server": p["server"],
-        "port": p["port"],
-        "proto": p["proto"],
-        "ca": LiteralString(p["ca"]),
+        "server": parsed["server"],
+        "port": parsed["port"],
+        "proto": parsed["proto"],
+        "ca": LiteralString(parsed["ca"]),
         "udp": True,
     }
-    if p["cert"] and p["key"]:
-        if PUBLIC_SUBSCRIPTION:
-            raise ValueError("client certificate/private key profile rejected for public subscription")
-        node["cert"] = LiteralString(p["cert"])
-        node["key"] = LiteralString(p["key"])
-    elif p["auth_user_pass"]:
+
+    # VPN Gate's public OpenVPN configuration uses auth-user-pass. Some current
+    # official downloads also contain inline client cert/key material. For the
+    # public subscription we intentionally prefer vpn/vpn authentication and do
+    # not publish a client private key. If auth-user-pass is absent, a public
+    # subscription cannot safely use an embedded private key, so reject it.
+    if parsed["auth_user_pass"]:
         node["username"] = "vpn"
         node["password"] = "vpn"
+    elif parsed["cert"] and parsed["key"]:
+        if PUBLIC_SUBSCRIPTION:
+            raise ValueError("no auth-user-pass; embedded client certificate/private key cannot be published")
+        node["cert"] = LiteralString(parsed["cert"])
+        node["key"] = LiteralString(parsed["key"])
     else:
-        raise ValueError("no usable cert/key or auth-user-pass")
+        raise ValueError("no usable auth-user-pass or cert/key authentication")
 
-    if p["cipher"]:
-        node["cipher"] = p["cipher"]
-    if p["auth"]:
-        node["auth"] = p["auth"]
-    if p["data_ciphers"]:
-        node["data-ciphers"] = [x for x in re.split(r"[,:\s]+", p["data_ciphers"].strip()) if x]
-    if p["data_ciphers_fallback"]:
-        node["data-ciphers-fallback"] = p["data_ciphers_fallback"]
-    if p["comp_lzo"]:
-        node["comp-lzo"] = p["comp_lzo"]
-    if p["tls_auth"]:
-        node["tls-auth"] = LiteralString(p["tls_auth"])
-        node["key-direction"] = str(p["key_direction"])
-    if p["tls_crypt"]:
-        node["tls-crypt"] = LiteralString(p["tls_crypt"])
-    if p["tls_crypt_v2"]:
-        node["tls-crypt-v2"] = LiteralString(p["tls_crypt_v2"])
+    if parsed["cipher"]:
+        node["cipher"] = parsed["cipher"]
+    if parsed["auth"]:
+        node["auth"] = parsed["auth"]
+    if parsed["data_ciphers"]:
+        node["data-ciphers"] = [x for x in re.split(r"[,:\s]+", parsed["data_ciphers"].strip()) if x]
+    if parsed["data_ciphers_fallback"]:
+        node["data-ciphers-fallback"] = parsed["data_ciphers_fallback"]
+    if parsed["comp_lzo"]:
+        node["comp-lzo"] = parsed["comp_lzo"]
+    if parsed["tls_auth"]:
+        node["tls-auth"] = LiteralString(parsed["tls_auth"])
+        node["key-direction"] = str(parsed["key_direction"])
+    if parsed["tls_crypt"]:
+        node["tls-crypt"] = LiteralString(parsed["tls_crypt"])
+    if parsed["tls_crypt_v2"]:
+        # Mihomo supports tls-crypt-v2 in current releases. This is copied only
+        # when the official profile actually supplies it.
+        node["tls-crypt-v2"] = LiteralString(parsed["tls_crypt_v2"])
     return node
 
 
@@ -339,38 +351,41 @@ def validate_config(config: dict[str, Any], min_proxies: int) -> None:
     if not isinstance(rules, list) or "PROCESS-NAME,FreeStyleReboot.exe,KR-LOWEST" not in rules:
         raise RuntimeError("expected FreeStyle Reboot routing rule missing")
 
-    names = [p.get("name") for p in proxies if isinstance(p, dict)]
+    names = [proxy.get("name") for proxy in proxies if isinstance(proxy, dict)]
     if len(names) != len(set(names)):
         raise RuntimeError("duplicate proxy names")
 
-    for p in proxies:
-        if not isinstance(p, dict) or p.get("type") != "openvpn":
+    for proxy in proxies:
+        if not isinstance(proxy, dict) or proxy.get("type") != "openvpn":
             raise RuntimeError("non-OpenVPN proxy in generated config")
-        if p.get("proto") != "udp" or p.get("udp") is not True:
-            raise RuntimeError(f"non-UDP proxy emitted: {p.get('name')}")
-        if ("username" in p or "password" in p) and ("cert" in p or "key" in p):
-            raise RuntimeError(f"mixed OpenVPN authentication modes: {p.get('name')}")
-        if PUBLIC_SUBSCRIPTION and ("cert" in p or "key" in p):
-            raise RuntimeError(f"private client key material must not be published: {p.get('name')}")
-        if "tls-auth" in p and ("tls-crypt" in p or "tls-crypt-v2" in p):
-            raise RuntimeError(f"mutually-exclusive TLS modes: {p.get('name')}")
-        if "tls-crypt" in p and "tls-crypt-v2" in p:
-            raise RuntimeError(f"mutually-exclusive TLS crypt modes: {p.get('name')}")
-        if "tls-auth" in p and p.get("key-direction") not in {"0", "1"}:
-            raise RuntimeError(f"invalid key-direction: {p.get('name')}")
+        if proxy.get("proto") != "udp" or proxy.get("udp") is not True:
+            raise RuntimeError(f"non-UDP proxy emitted: {proxy.get('name')}")
+        has_auth = "username" in proxy or "password" in proxy
+        has_cert_key = "cert" in proxy or "key" in proxy
+        if has_auth == has_cert_key:
+            raise RuntimeError(f"invalid OpenVPN authentication mode: {proxy.get('name')}")
+        if PUBLIC_SUBSCRIPTION and has_cert_key:
+            raise RuntimeError(f"private client certificate/key must not be published: {proxy.get('name')}")
+        if "tls-auth" in proxy and ("tls-crypt" in proxy or "tls-crypt-v2" in proxy):
+            raise RuntimeError(f"mutually-exclusive TLS settings: {proxy.get('name')}")
+        if "tls-crypt" in proxy and "tls-crypt-v2" in proxy:
+            raise RuntimeError(f"mutually-exclusive TLS crypt settings: {proxy.get('name')}")
+        if "tls-auth" in proxy and proxy.get("key-direction") not in {"0", "1"}:
+            raise RuntimeError(f"invalid key-direction: {proxy.get('name')}")
         for field in ("ca", "cert", "key", "tls-auth", "tls-crypt", "tls-crypt-v2"):
-            value = p.get(field)
+            value = proxy.get(field)
             if isinstance(value, str) and "BEGIN " in value and "\n" not in value:
-                raise RuntimeError(f"PEM newline corruption: {p.get('name')}:{field}")
+                raise RuntimeError(f"PEM newline corruption: {proxy.get('name')}:{field}")
 
 
 def build_config(candidates: list[Candidate], out_path: Path) -> int:
     proxies: list[dict[str, Any]] = []
     names: list[str] = []
-    for idx, candidate in enumerate(candidates, 1):
-        name = f"KR-{idx:02d}-{clean_name(candidate.hostname or candidate.ip.replace('.', '-'))}"
+    for index, candidate in enumerate(candidates, 1):
+        name = f"KR-{index:02d}-{clean_name(candidate.hostname or candidate.ip.replace('.', '-'))}"
         try:
-            proxies.append(ovpn_to_mihomo(candidate.ovpn, name))
+            proxy = ovpn_to_mihomo(candidate.ovpn, name)
+            proxies.append(proxy)
             names.append(name)
         except Exception as exc:
             print(f"[skip] {candidate.hostname or candidate.ip}: {exc}")
@@ -433,8 +448,8 @@ def benchmark(
     headers = {"Authorization": f"Bearer {secret}"} if secret else {}
     for name in names:
         samples: list[int] = []
+        endpoint = f"{controller.rstrip('/')}/proxies/{quote(name, safe='')}/delay"
         for sample_index in range(max(1, repeat)):
-            endpoint = f"{controller.rstrip('/')}/proxies/{quote(name, safe='')}/delay"
             try:
                 response = session.get(
                     endpoint,
@@ -548,19 +563,19 @@ def main() -> int:
             if detect_openvpn_proto(ovpn) != "udp":
                 raise ValueError("downloaded profile is not UDP")
             parsed = parse_ovpn(ovpn)
-            if PUBLIC_SUBSCRIPTION and parsed["key"]:
-                raise ValueError("downloaded profile contains client private key material")
+            if PUBLIC_SUBSCRIPTION and not parsed["auth_user_pass"] and not (parsed["cert"] and parsed["key"]):
+                raise ValueError("downloaded profile has no usable public authentication mode")
             candidates.append(
                 Candidate(
-                    server["hostname"],
-                    server["ip"],
-                    server["ping"],
-                    server["speed_bps"],
-                    server["score"],
-                    server["udp_port"],
-                    server["sid"],
-                    server["hid"],
-                    ovpn,
+                    hostname=server["hostname"],
+                    ip=server["ip"],
+                    ping=server["ping"],
+                    speed_bps=server["speed_bps"],
+                    score=server["score"],
+                    udp_port=server["udp_port"],
+                    sid=server["sid"],
+                    hid=server["hid"],
+                    ovpn=ovpn,
                 )
             )
         except Exception as exc:
