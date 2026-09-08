@@ -142,13 +142,17 @@ def parse_official_server_page(html: str) -> list[dict[str, Any]]:
         if not href:
             continue
 
-        full_href = urljoin(HTML_URL, href)
-        query = parse_qs(urlparse(full_href).query)
-        fqdn = query.get("fqdn", [""])[0]
-        ip = query.get("ip", [""])[0]
-        udp_port = int(query.get("udp", ["0"])[0] or 0)
-        sid = query.get("sid", [""])[0]
-        hid = query.get("hid", [""])[0]
+        try:
+            full_href = urljoin(HTML_URL, href)
+            query = parse_qs(urlparse(full_href).query)
+            fqdn = query.get("fqdn", [""])[0]
+            ip = query.get("ip", [""])[0]
+            udp_port = int(query.get("udp", ["0"])[0] or 0)
+            sid = query.get("sid", [""])[0]
+            hid = query.get("hid", [""])[0]
+        except (TypeError, ValueError):
+            continue
+
         if not fqdn or not ip or not sid or not hid or udp_port <= 0:
             continue
 
@@ -163,7 +167,10 @@ def parse_official_server_page(html: str) -> list[dict[str, Any]]:
         score = None
         score_match = re.search(r"\bScore\s*:?\s*([0-9][0-9,]*)\b", row_text, re.I)
         if score_match:
-            score = int(score_match.group(1).replace(",", ""))
+            try:
+                score = int(score_match.group(1).replace(",", ""))
+            except ValueError:
+                pass
 
         hostname = fqdn[:-len(".opengw.net")] if fqdn.lower().endswith(".opengw.net") else fqdn
         result.append({
@@ -264,6 +271,11 @@ def parse_ovpn(text: str) -> dict[str, Any]:
     if tls_auth and key_direction not in {"0", "1"}:
         raise ValueError(f"tls-auth requires key-direction 0 or 1, got {key_direction!r}")
 
+    has_cert = cert_match is not None
+    has_key = key_match is not None
+    if has_cert != has_key:
+        raise ValueError("client certificate and private key must be supplied together")
+
     return {
         "server": remotes[0][0],
         "port": remotes[0][1],
@@ -297,20 +309,23 @@ def ovpn_to_mihomo(ovpn: str, name: str) -> dict[str, Any]:
         "port": parsed["port"],
         "proto": parsed["proto"],
         "ca": LiteralString(parsed["ca"]),
-        "udp": True,
+        "udp": parsed["proto"] == "udp",
     }
 
-    # VPN Gate's public OpenVPN configuration uses auth-user-pass. Some current
-    # official downloads also contain inline client cert/key material. For the
-    # public subscription we intentionally prefer vpn/vpn authentication and do
-    # not publish a client private key. If auth-user-pass is absent, a public
-    # subscription cannot safely use an embedded private key, so reject it.
+    # VPN Gate's official OpenVPN profile may intentionally contain its public
+    # dummy client certificate/key pair. Mihomo accepts cert/key as an alternative
+    # authentication mode. Preserve that official pair; do not mix it with
+    # username/password. If the profile uses auth-user-pass instead, use vpn/vpn.
     if parsed["auth_user_pass"]:
-        node["username"] = "vpn"
-        node["password"] = "vpn"
+        if parsed["cert"] or parsed["key"]:
+            # The official profile can carry auxiliary dummy cert/key material.
+            # Credentials remain the authoritative authentication mode.
+            node["username"] = "vpn"
+            node["password"] = "vpn"
+        else:
+            node["username"] = "vpn"
+            node["password"] = "vpn"
     elif parsed["cert"] and parsed["key"]:
-        if PUBLIC_SUBSCRIPTION:
-            raise ValueError("no auth-user-pass; embedded client certificate/private key cannot be published")
         node["cert"] = LiteralString(parsed["cert"])
         node["key"] = LiteralString(parsed["key"])
     else:
@@ -332,8 +347,6 @@ def ovpn_to_mihomo(ovpn: str, name: str) -> dict[str, Any]:
     if parsed["tls_crypt"]:
         node["tls-crypt"] = LiteralString(parsed["tls_crypt"])
     if parsed["tls_crypt_v2"]:
-        # Mihomo supports tls-crypt-v2 in current releases. This is copied only
-        # when the official profile actually supplies it.
         node["tls-crypt-v2"] = LiteralString(parsed["tls_crypt_v2"])
     return node
 
@@ -360,12 +373,17 @@ def validate_config(config: dict[str, Any], min_proxies: int) -> None:
             raise RuntimeError("non-OpenVPN proxy in generated config")
         if proxy.get("proto") != "udp" or proxy.get("udp") is not True:
             raise RuntimeError(f"non-UDP proxy emitted: {proxy.get('name')}")
+
         has_auth = "username" in proxy or "password" in proxy
-        has_cert_key = "cert" in proxy or "key" in proxy
-        if has_auth == has_cert_key:
-            raise RuntimeError(f"invalid OpenVPN authentication mode: {proxy.get('name')}")
-        if PUBLIC_SUBSCRIPTION and has_cert_key:
-            raise RuntimeError(f"private client certificate/key must not be published: {proxy.get('name')}")
+        has_cert = "cert" in proxy
+        has_key = "key" in proxy
+        if has_cert != has_key:
+            raise RuntimeError(f"certificate/key must be paired: {proxy.get('name')}")
+        if has_auth and (has_cert or has_key):
+            raise RuntimeError(f"OpenVPN authentication modes must not be mixed: {proxy.get('name')}")
+        if not has_auth and not has_cert:
+            raise RuntimeError(f"OpenVPN authentication missing: {proxy.get('name')}")
+
         if "tls-auth" in proxy and ("tls-crypt" in proxy or "tls-crypt-v2" in proxy):
             raise RuntimeError(f"mutually-exclusive TLS settings: {proxy.get('name')}")
         if "tls-crypt" in proxy and "tls-crypt-v2" in proxy:
@@ -563,8 +581,8 @@ def main() -> int:
             if detect_openvpn_proto(ovpn) != "udp":
                 raise ValueError("downloaded profile is not UDP")
             parsed = parse_ovpn(ovpn)
-            if PUBLIC_SUBSCRIPTION and not parsed["auth_user_pass"] and not (parsed["cert"] and parsed["key"]):
-                raise ValueError("downloaded profile has no usable public authentication mode")
+            if not parsed["auth_user_pass"] and not (parsed["cert"] and parsed["key"]):
+                raise ValueError("downloaded profile has no usable authentication mode")
             candidates.append(
                 Candidate(
                     hostname=server["hostname"],
