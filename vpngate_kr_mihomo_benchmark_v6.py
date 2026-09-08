@@ -23,6 +23,7 @@ DEFAULT_TEST_URL = "https://www.naver.com/"
 DEFAULT_EXPECTED_STATUS = "200"
 MAX_CSV_PING_MS = 45
 DEFAULT_MIN_SPEED = 0
+PUBLIC_SUBSCRIPTION = True
 USER_AGENT = "Mozilla/5.0 (compatible; VPNGate-KR-Mihomo/6.0)"
 
 
@@ -181,22 +182,23 @@ def detect_openvpn_proto(text: str) -> str:
         line = re.split(r"[#;]", raw, maxsplit=1)[0].strip()
         if not line:
             continue
-        f = line.split()
-        if f[0].lower() == "proto" and len(f) >= 2:
-            global_proto = f[1].lower()
-        elif f[0].lower() == "remote" and len(f) >= 4:
-            remotes.append(f[3].lower())
+        fields = line.split()
+        directive = fields[0].lower()
+        if directive == "proto" and len(fields) >= 2:
+            global_proto = fields[1].lower()
+        elif directive == "remote" and len(fields) >= 4:
+            remotes.append(fields[3].lower())
 
-    def norm(p: str) -> str:
-        if p in {"udp", "udp4", "udp6"}:
+    def norm(proto: str) -> str:
+        if proto in {"udp", "udp4", "udp6"}:
             return "udp"
-        if p in {
+        if proto in {
             "tcp", "tcp4", "tcp6",
             "tcp-client", "tcp4-client", "tcp6-client",
             "tcp-server", "tcp4-server", "tcp6-server",
         }:
             return "tcp"
-        raise ValueError(f"unsupported OpenVPN proto: {p}")
+        raise ValueError(f"unsupported OpenVPN proto: {proto}")
 
     gp = norm(global_proto)
     rp = [norm(x) for x in remotes]
@@ -209,51 +211,71 @@ def parse_ovpn(text: str) -> dict[str, Any]:
         line = re.split(r"[#;]", raw, maxsplit=1)[0].strip()
         if not line:
             continue
-        f = line.split()
-        if f and f[0].lower() == "remote" and len(f) >= 2:
-            port = int(f[2]) if len(f) >= 3 and f[2].isdigit() else 1194
-            proto = f[3] if len(f) >= 4 else None
-            remotes.append((f[1], port, proto))
+        fields = line.split()
+        if fields and fields[0].lower() == "remote" and len(fields) >= 2:
+            port = int(fields[2]) if len(fields) >= 3 and fields[2].isdigit() else 1194
+            proto_arg = fields[3] if len(fields) >= 4 else None
+            remotes.append((fields[1], port, proto_arg))
     if not remotes:
         raise ValueError("missing OpenVPN remote")
 
-    def m(pattern: str) -> str | None:
-        x = re.search(pattern, text, re.I | re.M)
-        return x.group(1).strip() if x else None
+    def scalar(name: str) -> str | None:
+        for raw in text.splitlines():
+            line = re.split(r"[#;]", raw, maxsplit=1)[0].strip()
+            fields = line.split(None, 1)
+            if len(fields) >= 2 and fields[0].lower() == name.lower():
+                return fields[1].strip()
+        return None
 
     def block(tag: str) -> str | None:
-        x = re.search(rf"<{tag}>\s*(.*?)\s*</{tag}>", text, re.I | re.S)
-        return x.group(1).strip() if x else None
+        m = re.search(rf"<{tag}>\s*(.*?)\s*</{tag}>", text, re.I | re.S)
+        return m.group(1).strip() if m else None
 
     ca = block("ca")
-    ca_match = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", ca or "", re.S)
-    if not ca_match:
+    ca_m = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", ca or "", re.S)
+    if not ca_m:
         raise ValueError("missing/invalid <ca>")
+
     cert = block("cert")
-    cert_match = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", cert or "", re.S)
+    cert_m = re.search(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", cert or "", re.S)
+
     key = block("key")
-    key_match = re.search(
+    key_m = re.search(
         r"-----BEGIN (?:RSA )?PRIVATE KEY-----.*?-----END (?:RSA )?PRIVATE KEY-----",
         key or "",
         re.S,
     )
+    if not key_m:
+        key_m = re.search(r"-----BEGIN EC PRIVATE KEY-----.*?-----END EC PRIVATE KEY-----", key or "", re.S)
+
     tls_auth = block("tls-auth")
     tls_crypt = block("tls-crypt")
-    proto = detect_openvpn_proto(text)
+    tls_crypt_v2 = block("tls-crypt-v2")
+    if tls_auth and (tls_crypt or tls_crypt_v2):
+        raise ValueError("OpenVPN profile contains mutually-exclusive tls-auth and TLS crypt directives")
+    if tls_crypt and tls_crypt_v2:
+        raise ValueError("OpenVPN profile contains mutually-exclusive tls-crypt and tls-crypt-v2")
+
+    key_direction = scalar("key-direction")
+    if tls_auth and key_direction not in {"0", "1"}:
+        raise ValueError(f"tls-auth requires key-direction 0 or 1, got {key_direction!r}")
+
     return {
         "server": remotes[0][0],
         "port": remotes[0][1],
-        "proto": proto,
-        "ca": ca_match.group(0).strip(),
-        "cert": cert_match.group(0).strip() if cert_match else None,
-        "key": key_match.group(0).strip() if key_match else None,
+        "proto": detect_openvpn_proto(text),
+        "ca": ca_m.group(0).strip(),
+        "cert": cert_m.group(0).strip() if cert_m else None,
+        "key": key_m.group(0).strip() if key_m else None,
         "tls_auth": tls_auth,
         "tls_crypt": tls_crypt,
-        "key_direction": m(r"^\s*key-direction\s+(\S+)\s*$"),
-        "cipher": m(r"^\s*cipher\s+(\S+)\s*$"),
-        "auth": m(r"^\s*auth\s+(\S+)\s*$"),
-        "data_ciphers": m(r"^\s*data-ciphers\s+(.+?)\s*$"),
-        "comp_lzo": m(r"^\s*comp-lzo\s+(\S+)\s*$"),
+        "tls_crypt_v2": tls_crypt_v2,
+        "key_direction": key_direction,
+        "cipher": scalar("cipher"),
+        "auth": scalar("auth"),
+        "data_ciphers": scalar("data-ciphers"),
+        "data_ciphers_fallback": scalar("data-ciphers-fallback"),
+        "comp_lzo": scalar("comp-lzo"),
         "auth_user_pass": bool(re.search(r"^\s*auth-user-pass(?:\s|$)", text, re.I | re.M)),
     }
 
@@ -274,6 +296,8 @@ def ovpn_to_mihomo(ovpn: str, name: str) -> dict[str, Any]:
         "udp": True,
     }
     if p["cert"] and p["key"]:
+        if PUBLIC_SUBSCRIPTION:
+            raise ValueError("client certificate/private key profile rejected for public subscription")
         node["cert"] = LiteralString(p["cert"])
         node["key"] = LiteralString(p["key"])
     elif p["auth_user_pass"]:
@@ -281,17 +305,24 @@ def ovpn_to_mihomo(ovpn: str, name: str) -> dict[str, Any]:
         node["password"] = "vpn"
     else:
         raise ValueError("no usable cert/key or auth-user-pass")
-    for key in ("cipher", "auth", "comp_lzo"):
-        if p[key]:
-            node[key] = p[key]
+
+    if p["cipher"]:
+        node["cipher"] = p["cipher"]
+    if p["auth"]:
+        node["auth"] = p["auth"]
     if p["data_ciphers"]:
-        node["data-ciphers"] = [x for x in re.split(r"[,\s]+", p["data_ciphers"]) if x]
+        node["data-ciphers"] = [x for x in re.split(r"[,:\s]+", p["data_ciphers"].strip()) if x]
+    if p["data_ciphers_fallback"]:
+        node["data-ciphers-fallback"] = p["data_ciphers_fallback"]
+    if p["comp_lzo"]:
+        node["comp-lzo"] = p["comp_lzo"]
     if p["tls_auth"]:
         node["tls-auth"] = LiteralString(p["tls_auth"])
-        if p["key_direction"]:
-            node["key-direction"] = str(p["key_direction"])
+        node["key-direction"] = str(p["key_direction"])
     if p["tls_crypt"]:
         node["tls-crypt"] = LiteralString(p["tls_crypt"])
+    if p["tls_crypt_v2"]:
+        node["tls-crypt-v2"] = LiteralString(p["tls_crypt_v2"])
     return node
 
 
@@ -307,15 +338,27 @@ def validate_config(config: dict[str, Any], min_proxies: int) -> None:
         raise RuntimeError("missing proxy-groups")
     if not isinstance(rules, list) or "PROCESS-NAME,FreeStyleReboot.exe,KR-LOWEST" not in rules:
         raise RuntimeError("expected FreeStyle Reboot routing rule missing")
+
     names = [p.get("name") for p in proxies if isinstance(p, dict)]
     if len(names) != len(set(names)):
         raise RuntimeError("duplicate proxy names")
+
     for p in proxies:
         if not isinstance(p, dict) or p.get("type") != "openvpn":
             raise RuntimeError("non-OpenVPN proxy in generated config")
         if p.get("proto") != "udp" or p.get("udp") is not True:
             raise RuntimeError(f"non-UDP proxy emitted: {p.get('name')}")
-        for field in ("ca", "cert", "key", "tls-auth", "tls-crypt"):
+        if ("username" in p or "password" in p) and ("cert" in p or "key" in p):
+            raise RuntimeError(f"mixed OpenVPN authentication modes: {p.get('name')}")
+        if PUBLIC_SUBSCRIPTION and ("cert" in p or "key" in p):
+            raise RuntimeError(f"private client key material must not be published: {p.get('name')}")
+        if "tls-auth" in p and ("tls-crypt" in p or "tls-crypt-v2" in p):
+            raise RuntimeError(f"mutually-exclusive TLS modes: {p.get('name')}")
+        if "tls-crypt" in p and "tls-crypt-v2" in p:
+            raise RuntimeError(f"mutually-exclusive TLS crypt modes: {p.get('name')}")
+        if "tls-auth" in p and p.get("key-direction") not in {"0", "1"}:
+            raise RuntimeError(f"invalid key-direction: {p.get('name')}")
+        for field in ("ca", "cert", "key", "tls-auth", "tls-crypt", "tls-crypt-v2"):
             value = p.get(field)
             if isinstance(value, str) and "BEGIN " in value and "\n" not in value:
                 raise RuntimeError(f"PEM newline corruption: {p.get('name')}:{field}")
@@ -324,13 +367,13 @@ def validate_config(config: dict[str, Any], min_proxies: int) -> None:
 def build_config(candidates: list[Candidate], out_path: Path) -> int:
     proxies: list[dict[str, Any]] = []
     names: list[str] = []
-    for idx, c in enumerate(candidates, 1):
-        name = f"KR-{idx:02d}-{clean_name(c.hostname or c.ip.replace('.', '-'))}"
+    for idx, candidate in enumerate(candidates, 1):
+        name = f"KR-{idx:02d}-{clean_name(candidate.hostname or candidate.ip.replace('.', '-'))}"
         try:
-            proxies.append(ovpn_to_mihomo(c.ovpn, name))
+            proxies.append(ovpn_to_mihomo(candidate.ovpn, name))
             names.append(name)
         except Exception as exc:
-            print(f"[skip] {c.hostname or c.ip}: {exc}")
+            print(f"[skip] {candidate.hostname or candidate.ip}: {exc}")
 
     config = {
         "mode": "rule",
@@ -352,13 +395,22 @@ def build_config(candidates: list[Candidate], out_path: Path) -> int:
             {"name": "KR-SELECT", "type": "select", "proxies": names + ["KR-LOWEST", "DIRECT"]},
         ],
         "rules": ["PROCESS-NAME,FreeStyleReboot.exe,KR-LOWEST", "MATCH,DIRECT"],
-        "tun": {"enable": True, "stack": "system", "auto-route": True, "auto-detect-interface": True},
+        "tun": {
+            "enable": True,
+            "stack": "system",
+            "auto-route": True,
+            "auto-detect-interface": True,
+        },
     }
     validate_config(config, 1)
-    text = "# VPN Gate KR Mihomo subscription generated by benchmark v6.0\n" + yaml.safe_dump(
-        config, allow_unicode=True, sort_keys=False, width=120
+    text = f"# VPN Gate KR Mihomo subscription generated by benchmark {SCRIPT_VERSION}\n" + yaml.safe_dump(
+        config,
+        allow_unicode=True,
+        sort_keys=False,
+        width=120,
     )
     out_path.write_text(text, encoding="utf-8")
+
     loaded = yaml.safe_load(text)
     if not isinstance(loaded, dict):
         raise RuntimeError("YAML reload failed")
@@ -366,64 +418,126 @@ def build_config(candidates: list[Candidate], out_path: Path) -> int:
     return len(proxies)
 
 
+def benchmark(
+    names: list[str],
+    session: requests.Session,
+    controller: str,
+    url: str,
+    repeat: int,
+    timeout_ms: int,
+    secret: str | None,
+    pause: float,
+    expected_status: str | None,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    headers = {"Authorization": f"Bearer {secret}"} if secret else {}
+    for name in names:
+        samples: list[int] = []
+        for sample_index in range(max(1, repeat)):
+            endpoint = f"{controller.rstrip('/')}/proxies/{quote(name, safe='')}/delay"
+            try:
+                response = session.get(
+                    endpoint,
+                    params={
+                        "url": url,
+                        "timeout": timeout_ms,
+                        **({"expected": expected_status} if expected_status else {}),
+                    },
+                    headers=headers,
+                    timeout=timeout_ms / 1000 + 2,
+                )
+                response.raise_for_status()
+                value = response.json().get("delay")
+                if isinstance(value, int):
+                    samples.append(value)
+            except (requests.RequestException, ValueError, TypeError):
+                pass
+            if sample_index + 1 < max(1, repeat):
+                time.sleep(max(0.0, pause))
+
+        results.append({
+            "name": name,
+            "samples_ms": samples,
+            "min_ms": min(samples) if samples else None,
+            "avg_ms": round(statistics.mean(samples), 2) if samples else None,
+            "max_ms": max(samples) if samples else None,
+            "jitter_ms": round(statistics.pstdev(samples), 2) if len(samples) >= 2 else None,
+            "timeouts": max(1, repeat) - len(samples),
+        })
+
+    results.sort(
+        key=lambda item: (
+            item["avg_ms"] is None,
+            item["avg_ms"] if item["avg_ms"] is not None else 10**9,
+            item["jitter_ms"] if item["jitter_ms"] is not None else 10**9,
+        )
+    )
+    return results
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--limit", type=int, default=20)
-    ap.add_argument("--min-speed", type=int, default=DEFAULT_MIN_SPEED)
-    ap.add_argument("--out-dir", default="vpngate_kr_benchmark")
-    ap.add_argument("--controller", default="")
-    ap.add_argument("--secret", default="")
-    ap.add_argument("--url", default=DEFAULT_TEST_URL)
-    ap.add_argument("--expected-status", default=DEFAULT_EXPECTED_STATUS)
-    ap.add_argument("--repeat", type=int, default=5)
-    ap.add_argument("--timeout", type=int, default=5000)
-    ap.add_argument("--pause", type=float, default=0.3)
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--min-speed", type=int, default=DEFAULT_MIN_SPEED)
+    parser.add_argument("--out-dir", default="vpngate_kr_benchmark")
+    parser.add_argument("--controller", default="")
+    parser.add_argument("--secret", default="")
+    parser.add_argument("--url", default=DEFAULT_TEST_URL)
+    parser.add_argument("--expected-status", default=DEFAULT_EXPECTED_STATUS)
+    parser.add_argument("--repeat", type=int, default=5)
+    parser.add_argument("--timeout", type=int, default=5000)
+    parser.add_argument("--pause", type=float, default=0.3)
+    args = parser.parse_args()
 
     session = requests.Session()
     session.headers.update({
         "User-Agent": USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
     })
+
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     print("[1/3] Downloading VPN Gate official server page...")
-    r = _request(session, HTML_URL)
-    servers = parse_official_server_page(r.text)
+    response = _request(session, HTML_URL)
+    servers = parse_official_server_page(response.text)
     if not servers:
         raise RuntimeError("no Korea Republic server rows found")
     print(f"        Korea server rows: {len(servers)}")
 
     eligible = [
-        s for s in servers
-        if s["ping"] < MAX_CSV_PING_MS
-        and s["udp_port"] > 0
-        and (not args.min_speed or (s["speed_bps"] or 0) >= args.min_speed * 1000)
+        server
+        for server in servers
+        if server["ping"] < MAX_CSV_PING_MS
+        and server["udp_port"] > 0
+        and (
+            not args.min_speed
+            or (server["speed_bps"] or 0) >= args.min_speed * 1000
+        )
     ]
     eligible.sort(
-        key=lambda x: (
-            x["ping"],
-            -(x["speed_bps"] or 0),
-            -(x["score"] or 0),
-            x["hostname"].lower(),
-            x["ip"],
+        key=lambda item: (
+            item["ping"],
+            -(item["speed_bps"] or 0),
+            -(item["score"] or 0),
+            item["hostname"].lower(),
+            item["ip"],
         )
     )
     print(f"        KR + Ping < {MAX_CSV_PING_MS} ms + UDP + speed filter: {len(eligible)}")
 
     candidates: list[Candidate] = []
-    for s in eligible:
+    for server in eligible:
         if len(candidates) >= max(0, args.limit):
             break
-        filename = f"vpngate_{s['ip']}_udp_{s['udp_port']}.ovpn"
+        filename = f"vpngate_{server['ip']}_udp_{server['udp_port']}.ovpn"
         url = (
             f"{OPENVPN_DOWNLOAD_URL}"
-            f"?sid={quote(s['sid'], safe='')}"
+            f"?sid={quote(server['sid'], safe='')}"
             f"&udp=1"
-            f"&host={quote(s['ip'], safe='')}"
-            f"&port={s['udp_port']}"
-            f"&hid={quote(s['hid'], safe='')}"
+            f"&host={quote(server['ip'], safe='')}"
+            f"&port={server['udp_port']}"
+            f"&hid={quote(server['hid'], safe='')}"
             f"&/{quote(filename, safe='')}"
         )
         try:
@@ -433,20 +547,35 @@ def main() -> int:
                 raise ValueError("invalid OpenVPN profile")
             if detect_openvpn_proto(ovpn) != "udp":
                 raise ValueError("downloaded profile is not UDP")
+            parsed = parse_ovpn(ovpn)
+            if PUBLIC_SUBSCRIPTION and parsed["key"]:
+                raise ValueError("downloaded profile contains client private key material")
             candidates.append(
                 Candidate(
-                    s["hostname"], s["ip"], s["ping"], s["speed_bps"], s["score"],
-                    s["udp_port"], s["sid"], s["hid"], ovpn,
+                    server["hostname"],
+                    server["ip"],
+                    server["ping"],
+                    server["speed_bps"],
+                    server["score"],
+                    server["udp_port"],
+                    server["sid"],
+                    server["hid"],
+                    ovpn,
                 )
             )
         except Exception as exc:
-            print(f"[skip] {s['hostname'] or s['ip']}: {exc}")
+            print(f"[skip] {server['hostname'] or server['ip']}: {exc}")
 
     print(f"        selected: {len(candidates)}")
     (out / "source_candidates.json").write_text(
-        json.dumps([c.__dict__ | {"ovpn": None} for c in candidates], ensure_ascii=False, indent=2),
+        json.dumps(
+            [candidate.__dict__ | {"ovpn": None} for candidate in candidates],
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
+
     yaml_path = out / "vpngate_kr_mihomo.yaml"
     count = build_config(candidates, yaml_path)
     print(f"        generated: {yaml_path}")
@@ -454,50 +583,32 @@ def main() -> int:
 
     if args.controller:
         print("[3/3] Benchmarking through Mihomo /delay...")
-        results: list[dict[str, Any]] = []
-        headers = {"Authorization": f"Bearer {args.secret}"} if args.secret else {}
-        loaded = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
-        proxy_names = [p["name"] for p in loaded["proxies"]]
-        for proxy in proxy_names:
-            samples: list[int] = []
-            for n in range(max(1, args.repeat)):
-                try:
-                    ep = f"{args.controller.rstrip('/')}/proxies/{quote(proxy, safe='')}/delay"
-                    dr = session.get(
-                        ep,
-                        params={"url": args.url, "timeout": args.timeout, "expected": args.expected_status},
-                        headers=headers,
-                        timeout=args.timeout / 1000 + 2,
-                    )
-                    dr.raise_for_status()
-                    value = dr.json().get("delay")
-                    if isinstance(value, int):
-                        samples.append(value)
-                except Exception:
-                    pass
-                if n + 1 < max(1, args.repeat):
-                    time.sleep(max(0.0, args.pause))
-            results.append({
-                "name": proxy,
-                "samples_ms": samples,
-                "min_ms": min(samples) if samples else None,
-                "avg_ms": round(statistics.mean(samples), 2) if samples else None,
-                "max_ms": max(samples) if samples else None,
-                "jitter_ms": round(statistics.pstdev(samples), 2) if len(samples) >= 2 else None,
-                "timeouts": max(1, args.repeat) - len(samples),
-            })
-        results.sort(
-            key=lambda x: (
-                x["avg_ms"] is None,
-                x["avg_ms"] if x["avg_ms"] is not None else 10**9,
-                x["jitter_ms"] if x["jitter_ms"] is not None else 10**9,
-            )
+        yaml_config = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+        names = [proxy["name"] for proxy in yaml_config["proxies"]]
+        results = benchmark(
+            names,
+            session,
+            args.controller,
+            args.url,
+            args.repeat,
+            args.timeout,
+            args.secret or None,
+            args.pause,
+            args.expected_status or None,
         )
         (out / "benchmark_results.json").write_text(
-            json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps(results, ensure_ascii=False, indent=2),
+            encoding="utf-8",
         )
+        for index, result in enumerate(results, 1):
+            print(
+                f"{index:>2}. {result['name']:<42} "
+                f"avg={result['avg_ms']} min={result['min_ms']} max={result['max_ms']} "
+                f"jitter={result['jitter_ms']} timeout={result['timeouts']}"
+            )
     else:
         print("[3/3] Live benchmark not requested.")
+
     return 0
 
 
