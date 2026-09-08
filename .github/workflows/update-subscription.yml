@@ -91,10 +91,16 @@ jobs:
                   raise SystemExit('proxy name missing')
               names.append(name)
 
-              if ('username' in proxy or 'password' in proxy) and ('cert' in proxy or 'key' in proxy):
-                  raise SystemExit(f'mixed authentication modes: {name}')
-              if 'key' in proxy or 'cert' in proxy:
-                  raise SystemExit(f'private client certificate/key must not be published: {name}')
+              has_userpass = 'username' in proxy or 'password' in proxy
+              has_cert = 'cert' in proxy
+              has_key = 'key' in proxy
+              if has_cert != has_key:
+                  raise SystemExit(f'certificate/key must be paired: {name}')
+              if has_userpass and (has_cert or has_key):
+                  raise SystemExit(f'mixed OpenVPN authentication modes: {name}')
+              if not has_userpass and not has_cert:
+                  raise SystemExit(f'OpenVPN authentication missing: {name}')
+
               if 'tls-auth' in proxy and ('tls-crypt' in proxy or 'tls-crypt-v2' in proxy):
                   raise SystemExit(f'mutually-exclusive TLS settings: {name}')
               if 'tls-crypt' in proxy and 'tls-crypt-v2' in proxy:
@@ -103,9 +109,7 @@ jobs:
                   raise SystemExit(f'invalid key-direction: {name}')
 
               cipher = proxy.get('cipher')
-              if cipher is not None and cipher == 'AES-CBC':
-                  cipher = 'AES-128-CBC'
-              if cipher is not None and cipher not in allowed_ciphers:
+              if cipher is not None and cipher not in allowed_ciphers and cipher != 'AES-CBC':
                   raise SystemExit(f'unsupported OpenVPN cipher in Mihomo: {name}: {cipher}')
 
               auth = proxy.get('auth')
@@ -120,12 +124,12 @@ jobs:
               if data_ciphers is not None:
                   if not isinstance(data_ciphers, list) or not data_ciphers:
                       raise SystemExit(f'invalid data-ciphers in Mihomo: {name}')
-                  bad = [x for x in data_ciphers if x not in allowed_ciphers]
+                  bad = [x for x in data_ciphers if x not in allowed_ciphers and x != 'AES-CBC']
                   if bad:
                       raise SystemExit(f'unsupported data-ciphers in Mihomo: {name}: {bad}')
 
               fallback = proxy.get('data-ciphers-fallback')
-              if fallback is not None and fallback not in allowed_ciphers:
+              if fallback is not None and fallback not in allowed_ciphers and fallback != 'AES-CBC':
                   raise SystemExit(f'unsupported data-ciphers-fallback: {name}: {fallback}')
 
               for field in ('ca', 'cert', 'key', 'tls-auth', 'tls-crypt', 'tls-crypt-v2'):
