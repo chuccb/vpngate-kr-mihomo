@@ -18,6 +18,12 @@ DEFAULT_WORKERS = 4
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_TEST_URL = "http://www.gstatic.com/generate_204"
 DEFAULT_EXPECTED_STATUS = "204"
+
+# The v7.1 base parser intentionally keeps its original defaults. The v7.2
+# generator uses the same validator with its own health-check policy.
+base.DEFAULT_TEST_URL = DEFAULT_TEST_URL
+base.DEFAULT_EXPECTED_STATUS = DEFAULT_EXPECTED_STATUS
+
 _worker_local = threading.local()
 _worker_sessions: list[requests.Session] = []
 _worker_sessions_lock = threading.Lock()
