@@ -21,13 +21,14 @@
 - 只保留一個 `KR-LOWEST` `url-test` 群組，不再建立 `KR-SELECT`
 - `KR-LOWEST` 由 Mihomo 依 `https://www.naver.com/` 的實際 health-check 延遲自動選擇最低延遲節點
 - `tolerance: 0`，不為了避免切換而容忍較高延遲節點
+- `lazy: true`，遊戲沒有實際使用 `KR-LOWEST` 時不持續做背景 health-check；開始使用後再正常進行節點測試
 - `PROCESS-NAME,FreeStyleReboot.exe,KR-LOWEST`
 - TUN 預設 `stack: system`
 - 產生後重新載入 YAML 驗證必要欄位、認證模式、TLS 互斥設定與 PEM 換行
 
 ## 為什麼整合成一個群組
 
-原本 `KR-LOWEST` 是自動選最低延遲的 `url-test`，`KR-SELECT` 則是讓你手動選節點的 `select`。兩者同時存在時，FreeStyle Reboot 已經固定走 `KR-LOWEST`，因此 `KR-SELECT` 對這條遊戲規則沒有必要，反而增加操作與配置複雜度。
+原本 `KR-LOWEST` 是自動選最低延遲的 `url-test`，`KR-SELECT` 則是讓你手動選節點。兩者同時存在時，FreeStyle Reboot 已經固定走 `KR-LOWEST`，因此 `KR-SELECT` 對這條遊戲規則沒有必要，反而增加操作與配置複雜度。
 
 現在只保留 `KR-LOWEST`，FreeStyle Reboot 直接交給它自動挑最低延遲節點。代價是沒有另外的手動節點選擇群組；如果要手動指定節點，可直接在 Mihomo/Clash Verge Rev 的節點介面選擇單一 proxy。
 
@@ -48,6 +49,8 @@ VPN Gate 官方 OpenVPN 下載檔可能包含 inline client certificate/private 
 ## 自動更新
 
 GitHub Actions 每 6 小時重新抓取一次，並在 workflow 驗證成功後才替換訂閱檔。節點不足或產物驗證失敗時，不會以失敗產物覆蓋既有訂閱。
+
+Publish 階段若遇到 main 分支短暫 race，workflow 會重新同步 `origin/main` 並最多重試 3 次，避免因並行更新造成訂閱未發布。
 
 ## Clash Verge Rev / TUN 注意事項
 
