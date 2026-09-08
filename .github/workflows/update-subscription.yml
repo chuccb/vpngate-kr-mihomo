@@ -5,6 +5,8 @@ on:
     - cron: '17 */6 * * *'
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths-ignore:
       - 'vpngate_kr_mihomo.yaml'
 
@@ -202,6 +204,7 @@ jobs:
           PY
 
       - name: Publish only after validation succeeds
+        if: github.ref == 'refs/heads/main'
         run: |
           cp build/vpngate_kr_mihomo.yaml vpngate_kr_mihomo.yaml
           rm -rf build
