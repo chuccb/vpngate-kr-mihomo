@@ -19,7 +19,7 @@ on:
       - 'vpngate_kr_mihomo.yaml'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: vpngate-kr-mihomo-update
@@ -211,7 +211,7 @@ jobs:
           if lowest.get('disable-udp') is not False:
               raise SystemExit('KR-LOWEST must keep UDP enabled')
 
-          print(f'validated proxies={len(proxies)}; single group=KR-LOWEST; lazy=true; find-process-mode=strict; Ping threshold=<40ms')
+          print(f'validated proxies={len(proxies)}; single group=KR-LOWEST; lazy=true; find-process-mode=strict; source=VPN Gate CSV + official UDP endpoint discovery; Ping threshold=<40ms')
           PY
 
       - name: Test configuration with official Mihomo
@@ -223,6 +223,8 @@ jobs:
 
       - name: Publish only after validation succeeds
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        permissions:
+          contents: write
         run: |
           cp build/vpngate_kr_mihomo.yaml vpngate_kr_mihomo.yaml
           rm -rf build
