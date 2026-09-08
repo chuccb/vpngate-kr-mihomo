@@ -35,7 +35,7 @@ jobs:
       - name: Generate candidate configuration
         run: |
           rm -rf build
-          python vpngate_kr_mihomo_benchmark_v6.py --limit 20 --out-dir build
+          python vpngate_kr_mihomo_benchmark_v6.py --limit 10 --out-dir build
 
       - name: Validate subscription before publishing
         env:
@@ -63,8 +63,10 @@ jobs:
 
           if not isinstance(proxies, list) or len(proxies) < minimum:
               raise SystemExit(f'proxy count below safety threshold: {len(proxies) if isinstance(proxies, list) else 0} < {minimum}')
-          if not isinstance(groups, list) or not groups:
-              raise SystemExit('proxy-groups missing')
+          if len(proxies) > 10:
+              raise SystemExit(f'proxy count exceeds configured maximum: {len(proxies)} > 10')
+          if not isinstance(groups, list) or len(groups) != 1:
+              raise SystemExit('expected exactly one proxy group')
           if 'PROCESS-NAME,FreeStyleReboot.exe,KR-LOWEST' not in (rules or []):
               raise SystemExit('FreeStyle Reboot rule missing')
           if not isinstance(tun, dict) or tun.get('enable') is not True:
@@ -140,8 +142,8 @@ jobs:
           if len(names) != len(set(names)):
               raise SystemExit('duplicate proxy names')
 
-          lowest = next((g for g in groups if isinstance(g, dict) and g.get('name') == 'KR-LOWEST'), None)
-          if not isinstance(lowest, dict) or lowest.get('type') != 'url-test':
+          lowest = groups[0]
+          if not isinstance(lowest, dict) or lowest.get('name') != 'KR-LOWEST' or lowest.get('type') != 'url-test':
               raise SystemExit('KR-LOWEST url-test group missing')
           if lowest.get('proxies') != names:
               raise SystemExit('KR-LOWEST proxy list does not match generated proxies')
@@ -149,8 +151,10 @@ jobs:
               raise SystemExit('KR-LOWEST must keep UDP enabled')
           if lowest.get('expected-status') != 200:
               raise SystemExit('unexpected health-check expected-status')
+          if lowest.get('tolerance') != 0:
+              raise SystemExit('KR-LOWEST tolerance must remain 0 for strict latency preference')
 
-          print(f'validated proxies={len(proxies)}')
+          print(f'validated proxies={len(proxies)}; single group=KR-LOWEST; max=10; source Ping threshold=<40ms')
           PY
 
       - name: Publish only after validation succeeds
