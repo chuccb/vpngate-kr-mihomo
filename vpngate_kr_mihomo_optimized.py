@@ -143,7 +143,7 @@ def _validate_v72_config(config: dict[str, Any]) -> None:
     legacy_group = dict(group)
     legacy_group["url"] = base.DEFAULT_TEST_URL
     legacy_group["expected-status"] = int(base.DEFAULT_EXPECTED_STATUS)
-    legacy_group["timeout"] = base.validate_config.__globals__["base"].DEFAULT_EXPECTED_STATUS if False else 3000
+    legacy_group["timeout"] = 3000
     legacy_group.pop("max-failed-times", None)
     legacy_view = dict(config)
     legacy_view["proxy-groups"] = [legacy_group]
