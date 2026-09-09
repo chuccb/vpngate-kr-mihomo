@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -59,11 +60,12 @@ class V72Tests(unittest.TestCase):
 
         def fake_validate(row: dict[str, str]):
             if row["HostName"] == "preferred":
+                time.sleep(0.05)
                 return preferred, None
             return duplicate, None
 
-        # Deliberately return the lower-priority duplicate as though it completed
-        # first; the implementation must still keep the preferred candidate.
+        # The lower-priority duplicate deliberately completes first. Source
+        # priority, not worker completion order, must decide which one survives.
         with patch.object(optimized, "validate_candidate", side_effect=fake_validate):
             selected, invalid = optimized.collect_candidates(
                 rows,
@@ -97,7 +99,7 @@ class V72Tests(unittest.TestCase):
         self.assertEqual(len(selected), 2)
         self.assertEqual(len(calls), 2)
 
-    def test_build_config_contains_clash_verge_process_and_tun_settings(self) -> None:
+    def test_build_config_contains_v72_health_check_process_and_tun_settings(self) -> None:
         items = [candidate("node", "1.2.3.4", 1194, 5, 100)]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.yaml"
@@ -112,6 +114,8 @@ class V72Tests(unittest.TestCase):
             self.assertEqual(config["tun"]["stack"], "system")
             self.assertEqual(config["tun"]["auto-route"], True)
             self.assertEqual(config["proxy-groups"][0]["type"], "url-test")
+            self.assertEqual(config["proxy-groups"][0]["url"], "http://www.gstatic.com/generate_204")
+            self.assertEqual(config["proxy-groups"][0]["expected-status"], 204)
             self.assertEqual(config["proxy-groups"][0]["lazy"], True)
             self.assertEqual(config["proxy-groups"][0]["tolerance"], 0)
             self.assertEqual(config["proxy-groups"][0]["disable-udp"], False)
