@@ -58,6 +58,9 @@ jobs:
           MIN_PROXIES: '3'
           EXPECTED_HEALTH_URL: 'http://www.gstatic.com/generate_204'
           EXPECTED_HEALTH_STATUS: '204'
+          EXPECTED_HEALTH_INTERVAL: '60'
+          EXPECTED_HEALTH_TIMEOUT: '5000'
+          EXPECTED_HEALTH_MAX_FAILED_TIMES: '2'
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -95,6 +98,12 @@ jobs:
               raise SystemExit('unexpected health-check URL in metadata')
           if metadata.get('health_check_expected_status') != int(os.environ['EXPECTED_HEALTH_STATUS']):
               raise SystemExit('unexpected health-check status in metadata')
+          if metadata.get('health_check_interval_seconds') != int(os.environ['EXPECTED_HEALTH_INTERVAL']):
+              raise SystemExit('unexpected health-check interval in metadata')
+          if metadata.get('health_check_timeout_ms') != int(os.environ['EXPECTED_HEALTH_TIMEOUT']):
+              raise SystemExit('unexpected health-check timeout in metadata')
+          if metadata.get('health_check_max_failed_times') != int(os.environ['EXPECTED_HEALTH_MAX_FAILED_TIMES']):
+              raise SystemExit('unexpected max-failed-times in metadata')
 
           proxies = cfg.get('proxies')
           groups = cfg.get('proxy-groups')
@@ -118,7 +127,7 @@ jobs:
           allowed_ciphers = {'AES-128-GCM', 'AES-256-GCM', 'AES-128-CBC', 'AES-256-CBC', 'CHACHA20-POLY1305', 'AES-CBC'}
           allowed_auth = {'MD5', 'SHA1', 'SHA256', 'SHA384', 'SHA512'}
           allowed_comp = {'yes', 'no', 'adaptive'}
-          for proxy in proxies:
+          for index, proxy in enumerate(proxies):
               if not isinstance(proxy, dict) or proxy.get('type') != 'openvpn':
                   raise SystemExit('unexpected proxy type')
               if proxy.get('proto') != 'udp' or proxy.get('udp') is not True:
@@ -168,14 +177,18 @@ jobs:
           selected = metadata.get('selected')
           if not isinstance(selected, list) or len(selected) != len(proxies):
               raise SystemExit('candidate metadata count does not match proxy count')
-          if any(
-              not isinstance(item, dict)
-              or item.get('country_short') != 'KR'
-              or item.get('country_long', '').lower() != 'korea republic of'
-              or not isinstance(item.get('ping'), int)
-              or not 0 <= item['ping'] < 40
-          for item in selected):
-              raise SystemExit('candidate metadata contains an invalid selected node')
+          for index, item in enumerate(selected):
+              if not isinstance(item, dict):
+                  raise SystemExit(f'candidate metadata item {index + 1} is not an object')
+              if item.get('country_short') != 'KR' or item.get('country_long', '').lower() != 'korea republic of':
+                  raise SystemExit(f'candidate metadata item {index + 1} is not KR')
+              ping = item.get('ping')
+              if not isinstance(ping, int) or not 0 <= ping < 40:
+                  raise SystemExit(f'candidate metadata item {index + 1} has invalid Ping')
+              if item.get('ip') != proxies[index].get('server'):
+                  raise SystemExit(f'proxy {index + 1} server does not match candidate metadata')
+              if item.get('udp_port') != proxies[index].get('port'):
+                  raise SystemExit(f'proxy {index + 1} UDP port does not match candidate metadata')
 
           lowest = groups[0]
           if not isinstance(lowest, dict) or lowest.get('name') != 'KR-LOWEST' or lowest.get('type') != 'url-test':
@@ -184,14 +197,23 @@ jobs:
               raise SystemExit('KR-LOWEST proxy list does not match generated proxies')
           if lowest.get('url') != os.environ['EXPECTED_HEALTH_URL']:
               raise SystemExit('unexpected KR-LOWEST health-check URL')
-          if lowest.get('interval') != 60 or lowest.get('timeout') != 3000:
+          if lowest.get('interval') != int(os.environ['EXPECTED_HEALTH_INTERVAL']) or lowest.get('timeout') != int(os.environ['EXPECTED_HEALTH_TIMEOUT']):
               raise SystemExit('unexpected health-check timing')
+          if lowest.get('max-failed-times') != int(os.environ['EXPECTED_HEALTH_MAX_FAILED_TIMES']):
+              raise SystemExit('unexpected max-failed-times')
           if lowest.get('tolerance') != 0 or lowest.get('lazy') is not True:
               raise SystemExit('unexpected url-test selection settings')
           if lowest.get('expected-status') != int(os.environ['EXPECTED_HEALTH_STATUS']) or lowest.get('disable-udp') is not False:
               raise SystemExit('unexpected url-test status/UDP settings')
 
-          print(f'validated proxies={len(proxies)}; URL={os.environ["EXPECTED_HEALTH_URL"]}; expected-status={os.environ["EXPECTED_HEALTH_STATUS"]}; find-process-mode=strict')
+          print(
+              f"validated proxies={len(proxies)}; URL={os.environ['EXPECTED_HEALTH_URL']}; "
+              f"expected-status={os.environ['EXPECTED_HEALTH_STATUS']}; "
+              f"interval={os.environ['EXPECTED_HEALTH_INTERVAL']}s; "
+              f"timeout={os.environ['EXPECTED_HEALTH_TIMEOUT']}ms; "
+              f"max-failed-times={os.environ['EXPECTED_HEALTH_MAX_FAILED_TIMES']}; "
+              f"find-process-mode=strict"
+          )
           PY
 
       - name: Test configuration with official Mihomo
