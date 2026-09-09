@@ -12,6 +12,7 @@ on:
       - 'vpngate_kr_mihomo_benchmark_v6.py'
       - 'vpngate_kr_mihomo_optimized.py'
       - 'tests/**'
+      - 'tools/**'
       - 'requirements.txt'
   push:
     branches:
@@ -47,6 +48,9 @@ jobs:
 
       - name: Run regression tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Check Python syntax
+        run: python -m py_compile vpngate_kr_mihomo_benchmark_v6.py vpngate_kr_mihomo_optimized.py tools/benchmark_clash_verge.py
 
       - name: Generate candidate configuration
         run: |
@@ -127,7 +131,7 @@ jobs:
           allowed_ciphers = {'AES-128-GCM', 'AES-256-GCM', 'AES-128-CBC', 'AES-256-CBC', 'CHACHA20-POLY1305', 'AES-CBC'}
           allowed_auth = {'MD5', 'SHA1', 'SHA256', 'SHA384', 'SHA512'}
           allowed_comp = {'yes', 'no', 'adaptive'}
-          for index, proxy in enumerate(proxies):
+          for proxy in proxies:
               if not isinstance(proxy, dict) or proxy.get('type') != 'openvpn':
                   raise SystemExit('unexpected proxy type')
               if proxy.get('proto') != 'udp' or proxy.get('udp') is not True:
