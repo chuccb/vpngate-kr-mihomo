@@ -18,6 +18,9 @@ DEFAULT_WORKERS = 4
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_TEST_URL = "http://www.gstatic.com/generate_204"
 DEFAULT_EXPECTED_STATUS = "204"
+DEFAULT_HEALTH_INTERVAL = 60
+DEFAULT_HEALTH_TIMEOUT_MS = 5000
+DEFAULT_MAX_FAILED_TIMES = 2
 
 _worker_local = threading.local()
 _worker_sessions: list[requests.Session] = []
@@ -127,13 +130,21 @@ def _validate_v72_config(config: dict[str, Any]) -> None:
         raise RuntimeError("unexpected v7.2 health-check URL")
     if group.get("expected-status") != int(DEFAULT_EXPECTED_STATUS):
         raise RuntimeError("unexpected v7.2 expected-status")
+    if group.get("interval") != DEFAULT_HEALTH_INTERVAL:
+        raise RuntimeError("unexpected v7.2 health-check interval")
+    if group.get("timeout") != DEFAULT_HEALTH_TIMEOUT_MS:
+        raise RuntimeError("unexpected v7.2 health-check timeout")
+    if group.get("max-failed-times") != DEFAULT_MAX_FAILED_TIMES:
+        raise RuntimeError("unexpected v7.2 max-failed-times")
 
     # Reuse the mature v7.1 structural validator without changing its historical
-    # Naver/200 defaults. Only the two health-check fields are translated for the
-    # compatibility validation view.
+    # Naver/200 defaults or its legacy timing expectations. The v7.2-only health
+    # check fields are translated for the compatibility validation view.
     legacy_group = dict(group)
     legacy_group["url"] = base.DEFAULT_TEST_URL
     legacy_group["expected-status"] = int(base.DEFAULT_EXPECTED_STATUS)
+    legacy_group["timeout"] = base.validate_config.__globals__["base"].DEFAULT_EXPECTED_STATUS if False else 3000
+    legacy_group.pop("max-failed-times", None)
     legacy_view = dict(config)
     legacy_view["proxy-groups"] = [legacy_group]
     base.validate_config(legacy_view, min_proxies=1)
@@ -176,10 +187,11 @@ def build_config_strict(
                 "type": "url-test",
                 "proxies": names,
                 "url": DEFAULT_TEST_URL,
-                "interval": 60,
-                "timeout": 3000,
+                "interval": DEFAULT_HEALTH_INTERVAL,
+                "timeout": DEFAULT_HEALTH_TIMEOUT_MS,
                 "tolerance": 0,
                 "lazy": True,
+                "max-failed-times": DEFAULT_MAX_FAILED_TIMES,
                 "expected-status": int(DEFAULT_EXPECTED_STATUS),
                 "disable-udp": False,
             }
@@ -216,6 +228,9 @@ def write_metadata(out: Path, candidates: list[base.Candidate]) -> None:
                 "ping_threshold_ms_exclusive": base.MAX_CSV_PING_MS,
                 "health_check_url": DEFAULT_TEST_URL,
                 "health_check_expected_status": int(DEFAULT_EXPECTED_STATUS),
+                "health_check_interval_seconds": DEFAULT_HEALTH_INTERVAL,
+                "health_check_timeout_ms": DEFAULT_HEALTH_TIMEOUT_MS,
+                "health_check_max_failed_times": DEFAULT_MAX_FAILED_TIMES,
                 "selected": [
                     {
                         "hostname": c.hostname,
