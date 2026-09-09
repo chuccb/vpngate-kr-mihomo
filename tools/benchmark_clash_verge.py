@@ -47,12 +47,6 @@ def test_proxy(
 
     for index in range(repeat):
         try:
-            data = request_json(
-                session,
-                endpoint,
-                timeout_seconds=timeout_ms / 1000 + 2,
-                headers=headers,
-            ) if False else None
             response = session.get(
                 endpoint,
                 params={
@@ -90,7 +84,7 @@ def test_proxy(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Benchmark all proxies in the current Mihomo/Clash Verge controller without changing configuration."
+        description="Benchmark OpenVPN proxies in the current Mihomo/Clash Verge controller without changing configuration."
     )
     parser.add_argument("--controller", default=DEFAULT_CONTROLLER)
     parser.add_argument("--secret", default="")
@@ -134,14 +128,15 @@ def main() -> int:
         print("Mihomo /proxies response does not contain a proxies object.", file=sys.stderr)
         return 1
 
-    names = [
+    names = sorted(
         name
         for name, item in proxies.items()
-        if isinstance(item, dict) and item.get("type") == "OpenVPN"
-    ]
-    names.sort()
+        if isinstance(item, dict)
+        and str(item.get("type", "")).lower() == "openvpn"
+        and name.startswith("KR-")
+    )
     if not names:
-        print("No OpenVPN proxies found in the current Mihomo controller.", file=sys.stderr)
+        print("No KR OpenVPN proxies found in the current Mihomo controller.", file=sys.stderr)
         return 1
 
     print(f"Controller : {args.controller}")
