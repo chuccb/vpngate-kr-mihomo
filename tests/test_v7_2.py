@@ -108,17 +108,42 @@ class V72Tests(unittest.TestCase):
             self.assertEqual([item.hostname for item in emitted], ["node"])
 
             config = base.yaml.safe_load(path.read_text(encoding="utf-8"))
+            group = config["proxy-groups"][0]
             self.assertEqual(config["find-process-mode"], "strict")
             self.assertEqual(config["rules"][0], "PROCESS-NAME,FreeStyleReboot.exe,KR-LOWEST")
             self.assertEqual(config["tun"]["enable"], True)
             self.assertEqual(config["tun"]["stack"], "system")
             self.assertEqual(config["tun"]["auto-route"], True)
-            self.assertEqual(config["proxy-groups"][0]["type"], "url-test")
-            self.assertEqual(config["proxy-groups"][0]["url"], "http://www.gstatic.com/generate_204")
-            self.assertEqual(config["proxy-groups"][0]["expected-status"], 204)
-            self.assertEqual(config["proxy-groups"][0]["lazy"], True)
-            self.assertEqual(config["proxy-groups"][0]["tolerance"], 0)
-            self.assertEqual(config["proxy-groups"][0]["disable-udp"], False)
+            self.assertEqual(group["type"], "url-test")
+            self.assertEqual(group["url"], "http://www.gstatic.com/generate_204")
+            self.assertEqual(group["expected-status"], 204)
+            self.assertEqual(group["interval"], 60)
+            self.assertEqual(group["timeout"], 5000)
+            self.assertEqual(group["max-failed-times"], 2)
+            self.assertEqual(group["lazy"], True)
+            self.assertEqual(group["tolerance"], 0)
+            self.assertEqual(group["disable-udp"], False)
+
+    def test_v72_validator_requires_health_timeout_and_failure_policy(self) -> None:
+        items = [candidate("node", "1.2.3.4", 1194, 5, 100)]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.yaml"
+            optimized.build_config_strict(items, path)
+            config = base.yaml.safe_load(path.read_text(encoding="utf-8"))
+
+            broken = dict(config)
+            broken_group = dict(config["proxy-groups"][0])
+            broken_group["timeout"] = 3000
+            broken["proxy-groups"] = [broken_group]
+            with self.assertRaisesRegex(RuntimeError, "health-check timeout"):
+                optimized._validate_v72_config(broken)
+
+            broken = dict(config)
+            broken_group = dict(config["proxy-groups"][0])
+            broken_group["max-failed-times"] = 5
+            broken["proxy-groups"] = [broken_group]
+            with self.assertRaisesRegex(RuntimeError, "max-failed-times"):
+                optimized._validate_v72_config(broken)
 
 
 if __name__ == "__main__":
