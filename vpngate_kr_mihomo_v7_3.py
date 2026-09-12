@@ -51,6 +51,14 @@ def validate_candidate_v73(row: dict[str, str]) -> tuple[base.Candidate | None, 
     return candidate, None
 
 
+def stable_proxy_name(candidate: base.Candidate) -> str:
+    """Use only the actual endpoint for a stable name across source reordering."""
+    parsed = _ORIGINAL_PARSE_OVPN(candidate.ovpn)
+    server = base._safe_server(parsed["server"])
+    server_name = base.clean_name(server.replace(".", "-"))
+    return f"KR-{server_name}-{parsed['port']}"
+
+
 def build_config_strict_v73(
     candidates: list[base.Candidate],
     out_path: Path,
@@ -67,9 +75,9 @@ def build_config_strict_v73(
             endpoint = (base._safe_server(parsed["server"]).lower(), parsed["port"])
             if endpoint in seen_endpoints:
                 continue
-            index = len(proxies) + 1
-            clean = base.clean_name(candidate.hostname or candidate.ip.replace(".", "-"))
-            name = f"KR-{index:02d}-{clean}"
+            name = stable_proxy_name(candidate)
+            if name in names:
+                raise ValueError(f"stable proxy name collision: {name}")
             proxy = base.ovpn_to_mihomo(candidate.ovpn, name)
             proxies.append(proxy)
             names.append(name)
@@ -149,6 +157,7 @@ def write_metadata_v73(out: Path, candidates: list[base.Candidate]) -> None:
                 "country_long": candidate.country_long,
                 "country_short": candidate.country_short,
                 "udp_port": parsed["port"],
+                "stable_proxy_name": stable_proxy_name(candidate),
             }
         )
 
@@ -234,6 +243,9 @@ def validate_config_v73(config: dict[str, Any]) -> None:
             value = proxy.get(field)
             if isinstance(value, str) and "BEGIN " in value and "\n" not in value:
                 raise RuntimeError(f"PEM newline corruption: {name}:{field}")
+
+    if len(names) != len(set(names)):
+        raise RuntimeError("duplicate proxy names")
 
     group = groups[0]
     if not isinstance(group, dict) or group.get("name") != "KR-LOWEST" or group.get("type") != "url-test":
