@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -142,6 +143,50 @@ def build_config_strict_v73(
     return len(proxies), emitted
 
 
+def write_metadata_v73(out: Path, candidates: list[base.Candidate]) -> None:
+    selected: list[dict[str, Any]] = []
+    for candidate in candidates:
+        parsed = _ORIGINAL_PARSE_OVPN(candidate.ovpn)
+        selected.append(
+            {
+                "hostname": candidate.hostname,
+                "ip": candidate.ip,
+                "profile_server": base._safe_server(parsed["server"]),
+                "profile_port": parsed["port"],
+                "ping": candidate.ping,
+                "speed_bps": candidate.speed_bps,
+                "score": candidate.score,
+                "country_long": candidate.country_long,
+                "country_short": candidate.country_short,
+                "udp_port": parsed["port"],
+            }
+        )
+
+    (out / "source_candidates.json").write_text(
+        json.dumps(
+            {
+                "source_api": base.API_URL,
+                "source_udp_endpoint_discovery": base.HTML_URL,
+                "script_version": SCRIPT_VERSION,
+                "base_parser_version": base.SCRIPT_VERSION,
+                "ping_threshold_ms_exclusive": base.MAX_CSV_PING_MS,
+                "health_check_url": DEFAULT_TEST_URL,
+                "health_check_expected_status": int(DEFAULT_EXPECTED_STATUS),
+                "health_check_interval_seconds": DEFAULT_HEALTH_INTERVAL,
+                "health_check_timeout_ms": DEFAULT_HEALTH_TIMEOUT_MS,
+                "health_check_tolerance_ms": DEFAULT_TOLERANCE_MS,
+                "health_check_lazy": DEFAULT_LAZY,
+                "health_check_max_failed_times": DEFAULT_MAX_FAILED_TIMES,
+                "selected": selected,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def validate_config_v73(config: dict[str, Any]) -> None:
     proxies = config.get("proxies")
     groups = config.get("proxy-groups")
@@ -228,6 +273,7 @@ def validate_config_v73(config: dict[str, Any]) -> None:
 
 
 optimized.build_config_strict = build_config_strict_v73
+optimized.write_metadata = write_metadata_v73
 
 
 if __name__ == "__main__":
