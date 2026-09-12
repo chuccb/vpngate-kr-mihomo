@@ -32,7 +32,7 @@ KEY
 """
 
 
-def candidate(name: str, auth: str = "SHA1", tls_auth: bool = False) -> base.Candidate:
+def candidate(name: str, auth: str = "SHA1", tls_auth: bool = False, port: int = 1194) -> base.Candidate:
     block = ""
     if tls_auth:
         block = "key-direction 1\n<tls-auth>\n-----BEGIN OpenVPN Static key V1-----\nKEY\n-----END OpenVPN Static key V1-----\n</tls-auth>"
@@ -44,8 +44,8 @@ def candidate(name: str, auth: str = "SHA1", tls_auth: bool = False) -> base.Can
         score=1,
         country_long="Korea Republic of",
         country_short="KR",
-        ovpn=PROFILE_TEMPLATE.format(server="1.2.3.4", port=1194, tls_auth=block, auth=auth),
-        udp_port=1194,
+        ovpn=PROFILE_TEMPLATE.format(server="1.2.3.4", port=port, tls_auth=block, auth=auth),
+        udp_port=port,
     )
 
 
@@ -56,6 +56,15 @@ class V73Tests(unittest.TestCase):
 
     def test_tls_auth_sha1_is_allowed(self) -> None:
         v73._validate_stable_openvpn_compat(candidate("good", auth="SHA1", tls_auth=True))
+
+    def test_proxy_name_is_stable_when_source_order_changes(self) -> None:
+        first = candidate("node-a", port=1194)
+        same_endpoint_different_source_name = candidate("node-b", port=1194)
+        other_endpoint = candidate("node-c", port=1195)
+
+        self.assertEqual(v73.stable_proxy_name(first), "KR-1-2-3-4-1194")
+        self.assertEqual(v73.stable_proxy_name(same_endpoint_different_source_name), "KR-1-2-3-4-1194")
+        self.assertNotEqual(v73.stable_proxy_name(first), v73.stable_proxy_name(other_endpoint))
 
     def test_low_latency_group_settings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
