@@ -50,6 +50,9 @@ def candidate(name: str, auth: str = "SHA1", tls_auth: bool = False, port: int =
 
 
 class V73Tests(unittest.TestCase):
+    def test_import_has_no_v72_global_side_effects(self) -> None:
+        self.assertEqual(base.SCRIPT_VERSION, "v7.1")
+
     def test_tls_auth_non_sha1_is_rejected_for_stable_core(self) -> None:
         with self.assertRaisesRegex(ValueError, "tls-auth with non-SHA1"):
             v73._validate_stable_openvpn_compat(candidate("bad", auth="SHA512", tls_auth=True))
@@ -76,7 +79,7 @@ class V73Tests(unittest.TestCase):
             cfg = base.yaml.safe_load(path.read_text(encoding="utf-8"))
             self.assertEqual(cfg["profile"]["store-selected"], True)
             self.assertEqual(cfg["proxy-groups"][0]["timeout"], 3000)
-            self.assertEqual(cfg["proxy-groups"][0]["tolerance"], 5)
+            self.assertEqual(cfg["proxy-groups"][0]["tolerance"], 0)
             self.assertEqual(cfg["proxy-groups"][0]["lazy"], False)
             self.assertEqual(cfg["proxy-groups"][0]["disable-udp"], False)
 
