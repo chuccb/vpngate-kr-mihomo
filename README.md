@@ -34,11 +34,11 @@ CSV 的 `OpenVPN_ConfigData_Base64` 不保證一定是 UDP；若 profile 是 TCP
 - 明確記錄 CSV source IP 與最終 OpenVPN profile `server:port`，避免 fallback 後 metadata 誤判。
 - Mihomo stable `v1.19.30` 對 `OpenVPN tls-auth` 的非 SHA-1 digest 有已知握手問題，因此 `tls-auth + auth != SHA1` 不進入正式 stable 訂閱；這不是因為 SHA-1 比其他 digest 更快，而是為了避開 stable core 的已知 bug。
 - `KR-LOWEST` health-check timeout 從 5000ms 收斂至 **3000ms**，死節點較快被排除。
-- `tolerance` 設為 **5ms**：小幅 RTT 抖動不會讓遊戲中頻繁更換節點；只有明顯更快的候選才值得切換。
+- `tolerance` 設為 **0ms**：以目前 Mihomo 行為為準，始終偏向量測到的最低延遲；不依賴目前仍存在的 url-test tolerance 邊界行為來保證遊戲穩定切換。
 - `lazy: false`：群組保持預熱，避免遊戲剛開始時才進行第一輪冷啟動 health-check。
-- `profile.store-selected: true`：保留上一次群組選擇，讓重新啟動後不必完全從零開始；仍會接受後續 health-check 修正。
+- `profile.store-selected: true`：保存上一次策略組選擇；節點名稱現在以實際 `server:port` 穩定生成，不會因 VPN Gate 排序改變而全部重新命名。
 
-這些調整的目標不是保證「任何環境都更快」，而是降低 **平均 RTT + 首包冷啟動 + 節點抖動/換線** 對競技遊戲的綜合影響。
+這些調整的目標不是保證「任何環境都更快」，而是讓 **節點淘汰更快、選擇行為更確定、遊戲啟動不冷、重新載入時盡量保留已選節點**。
 
 ## Clash Verge Rev / Mihomo 設定
 
@@ -57,7 +57,7 @@ proxy-groups:
     url: http://www.gstatic.com/generate_204
     interval: 60
     timeout: 3000
-    tolerance: 5
+    tolerance: 0
     lazy: false
     max-failed-times: 2
     expected-status: 204
@@ -76,19 +76,17 @@ tun:
 
 Clash Verge Rev repository：`https://github.com/Clash-Verge-rev/clash-verge-rev`
 
-本專案保留 `stack: system` 作為 Windows 遊戲的實用預設。Mihomo 官方文件：`https://wiki.metacubex.one/en/config/inbound/tun/`
-
-官方文件指出，`system` 使用系統網路協定堆疊；在 Windows 多出口/虛擬網卡環境，應檢查實際 outbound interface。Windows 防火牆也必須允許 Mihomo core；本專案沒有硬寫 `interface-name`，因為公開 subscription 無法知道每台 Windows 的實體 NIC 名稱。
+本專案保留 `stack: system` 作為 Windows 遊戲的實用預設。Mihomo 官方文件指出，`auto-detect-interface` 在多個出口介面同時存在時建議改為手動指定；Windows 防火牆也必須允許 Mihomo core。公開 subscription 不硬寫 `interface-name`，因為每台 Windows 的實體 NIC 名稱不同。
 
 ## OpenVPN 相容性
 
 Mihomo OpenVPN 官方文件：`https://wiki.metacubex.one/en/config/proxies/openvpn/`
 
-Mihomo OpenVPN outbound 支援 `proto: udp/tcp`、username/password 或 cert/key 二選一、CA、`tls-auth` / `tls-crypt` / `tls-crypt-v2`、`key-direction`、`cipher`、`data-ciphers`、`data-ciphers-fallback`、`auth`、`comp-lzo`、`ping`、`ping-restart`、`handshake-timeout` 等欄位。生成器不為了理論速度擅自改寫 VPN Gate 原始 profile 的傳輸與加密設定。
+Mihomo OpenVPN outbound 支援 `proto: udp/tcp`、username/password 或 cert/key 二選一、CA、`tls-auth` / `tls-crypt` / `tls-crypt-v2`、`key-direction`、`cipher`、`data-ciphers`、`data-ciphers-fallback`、`auth`、`comp-lzo`、`ping`、`ping-restart`、`tran-window`、`handshake-timeout` 等欄位。生成器不為了理論速度擅自改寫 VPN Gate 原始 profile 的傳輸與加密設定。
 
 VPN Gate 官方也明確建議：如果 UDP 可以使用，一般應優先選 UDP；其 server table 同時提供 hostname 與 IP profile。官方還提醒 server list 偶爾可能含有錯誤 IP，因此本專案仍會以實際下載並解析的 profile endpoint 作最後依據。
 
-## stable Mihomo 的 tls-auth 邊界
+### stable Mihomo 的 tls-auth 邊界
 
 Mihomo `v1.19.30` 的 stable release 之後，development branch 修正了 OpenVPN `tls-auth` HMAC digest 應依 `auth` 派生、而不是固定 SHA-1 的問題。相關 issue：`https://github.com/MetaCubeX/mihomo/issues/2992`
 
@@ -102,7 +100,7 @@ GitHub Actions 使用 VPN Gate 官方 CSV Ping，只用於候選篩選；它不�
 
 `/proxies/{name}/delay` 是 Mihomo 的 HTTP URL delay API：`https://wiki.metacubex.one/en/api/`
 
-因此 v7.3 的 `tolerance: 5` 是穩定性取捨，不是把理論最低 HTTP RTT 最大化；對持續 UDP 遊戲流量，避免因 1～4ms 的短暫波動頻繁換線通常比每輪都追逐絕對最低數字更合理。
+目前將 `tolerance: 0`，因為 Mihomo upstream 仍有一個公開的 url-test tolerance 邊界問題（#2945）；在該情況下即使設置非零 tolerance，也不應把它當成遊戲穩定切換的可靠保證。對你的用途，這反而讓「最低 HTTP 探測延遲」的選擇規則最單純、最可預測。
 
 `lazy: false` 則刻意選擇預熱，而不是節省所有背景探測；10 個節點每 60 秒一次健康檢查所增加的流量通常很小，換取遊戲啟動時較低的冷啟動風險。`max-failed-times: 2` 保留較快淘汰連續失敗節點的行為。
 
