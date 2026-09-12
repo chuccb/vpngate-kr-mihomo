@@ -12,14 +12,14 @@ import vpngate_kr_mihomo_optimized as optimized
 
 SCRIPT_VERSION = "v7.3"
 
-# Tuned for a low-latency Windows gaming workload rather than the generic
-# "always switch to the absolute fastest probe" behavior of v7.2.
+# Tuned for a low-latency Windows gaming workload. Keep the policy simple and
+# deterministic; do not add speculative protocol tweaks to VPN Gate profiles.
 DEFAULT_TEST_URL = "http://www.gstatic.com/generate_204"
 DEFAULT_EXPECTED_STATUS = "204"
 DEFAULT_HEALTH_INTERVAL = 60
 DEFAULT_HEALTH_TIMEOUT_MS = 3000
 DEFAULT_MAX_FAILED_TIMES = 2
-DEFAULT_TOLERANCE_MS = 5
+DEFAULT_TOLERANCE_MS = 0
 DEFAULT_LAZY = False
 
 _ORIGINAL_VALIDATE_CANDIDATE = optimized.validate_candidate
@@ -28,10 +28,8 @@ _ORIGINAL_PARSE_OVPN = base.parse_ovpn
 
 def _validate_stable_openvpn_compat(candidate: base.Candidate) -> None:
     parsed = _ORIGINAL_PARSE_OVPN(candidate.ovpn)
-    # Mihomo stable v1.19.30 has an OpenVPN tls-auth bug when the HMAC digest
-    # differs from the historical SHA-1 behavior. Keep the generated stable
-    # subscription on the known-good side of that boundary. The upstream bug
-    # was fixed later on the development branch.
+    # Mihomo stable v1.19.30 has a known OpenVPN tls-auth HMAC-digest issue.
+    # Keep the stable subscription on the known-compatible SHA-1 path.
     if parsed["tls_auth"]:
         auth = (parsed["auth"] or "SHA1").strip().upper()
         if auth != "SHA1":
@@ -52,7 +50,7 @@ def validate_candidate_v73(row: dict[str, str]) -> tuple[base.Candidate | None, 
 
 
 def stable_proxy_name(candidate: base.Candidate) -> str:
-    """Use only the actual endpoint for a stable name across source reordering."""
+    """Use the actual OpenVPN endpoint so names survive source reordering."""
     parsed = _ORIGINAL_PARSE_OVPN(candidate.ovpn)
     server = base._safe_server(parsed["server"])
     server_name = base.clean_name(server.replace(".", "-"))
@@ -105,10 +103,11 @@ def build_config_strict_v73(
                 "url": DEFAULT_TEST_URL,
                 "interval": DEFAULT_HEALTH_INTERVAL,
                 "timeout": DEFAULT_HEALTH_TIMEOUT_MS,
-                # Do not churn between nearly identical routes during a game.
+                # Prefer the measured minimum because current Mihomo has an
+                # open url-test tolerance edge case; do not depend on tolerance
+                # for gaming stability until the upstream issue is resolved.
                 "tolerance": DEFAULT_TOLERANCE_MS,
-                # Keep the group warmed up so the first game packet does not
-                # have to wait for a cold health-check cycle.
+                # Keep the group warm so game startup is not the first probe.
                 "lazy": DEFAULT_LAZY,
                 "max-failed-times": DEFAULT_MAX_FAILED_TIMES,
                 "expected-status": int(DEFAULT_EXPECTED_STATUS),
