@@ -3,8 +3,16 @@ from __future__ import annotations
 
 import sys
 import threading
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+
+# When a script under tools/ is executed directly, Python puts tools/ (not the
+# repository root) on sys.path. Add the root explicitly so the existing
+# top-level generator modules remain importable both locally and in CI.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import vpngate_kr_mihomo_benchmark_v6 as base
 import vpngate_kr_mihomo_v7_3 as v73
