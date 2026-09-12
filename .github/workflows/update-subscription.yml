@@ -1,0 +1,94 @@
+name: Update VPN Gate KR Mihomo subscription
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/update-subscription.yml'
+      - 'vpngate_kr_mihomo_benchmark_v6.py'
+      - 'vpngate_kr_mihomo_optimized.py'
+      - 'vpngate_kr_mihomo_v7_3.py'
+      - 'tests/**'
+      - 'tools/**'
+      - 'requirements.txt'
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'vpngate_kr_mihomo.yaml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vpngate-kr-mihomo-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Check Python syntax
+        run: python -m py_compile vpngate_kr_mihomo_benchmark_v6.py vpngate_kr_mihomo_optimized.py vpngate_kr_mihomo_v7_3.py tools/run_v73_complete_udp.py tools/validate_generated.py tools/benchmark_clash_verge.py
+
+      - name: Generate candidate configuration
+        run: |
+          rm -rf build
+          python tools/run_v73_complete_udp.py --limit 10 --out-dir build --workers 4 --batch-size 8
+
+      - name: Validate generated configuration
+        run: python tools/validate_generated.py
+
+      - name: Test configuration with official Mihomo
+        run: |
+          docker run --rm --pull=always \
+            -v "$PWD/build:/work:ro" \
+            metacubex/mihomo:v1.19.30 \
+            -t -d /work -f /work/vpngate_kr_mihomo.yaml
+
+      - name: Publish only after validation succeeds
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: |
+          cp build/vpngate_kr_mihomo.yaml vpngate_kr_mihomo.yaml
+          rm -rf build
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add vpngate_kr_mihomo.yaml
+          if git diff --cached --quiet; then
+            echo 'Subscription unchanged; nothing to commit.'
+            exit 0
+          fi
+          git commit -m 'Update VPN Gate KR Mihomo subscription'
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then exit 0; fi
+            echo "git push failed; rebasing onto current origin/main (attempt ${attempt}/3)"
+            git fetch origin main
+            git rebase origin/main || {
+              git rebase --abort || true
+              git reset --soft origin/main
+              git add vpngate_kr_mihomo.yaml
+              git commit -m 'Update VPN Gate KR Mihomo subscription'
+            }
+          done
+          echo 'failed to publish after 3 attempts'
+          exit 1
