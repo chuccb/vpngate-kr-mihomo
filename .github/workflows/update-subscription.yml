@@ -65,7 +65,7 @@ jobs:
           EXPECTED_HEALTH_STATUS: '204'
           EXPECTED_HEALTH_INTERVAL: '60'
           EXPECTED_HEALTH_TIMEOUT: '3000'
-          EXPECTED_HEALTH_TOLERANCE: '5'
+          EXPECTED_HEALTH_TOLERANCE: '0'
           EXPECTED_HEALTH_MAX_FAILED_TIMES: '2'
           EXPECTED_LAZY: 'false'
         run: |
@@ -112,6 +112,10 @@ jobs:
               raise SystemExit('unexpected health-check interval in metadata')
           if metadata.get('health_check_timeout_ms') != int(os.environ['EXPECTED_HEALTH_TIMEOUT']):
               raise SystemExit('unexpected health-check timeout in metadata')
+          if metadata.get('health_check_tolerance_ms') != int(os.environ['EXPECTED_HEALTH_TOLERANCE']):
+              raise SystemExit('unexpected health-check tolerance in metadata')
+          if metadata.get('health_check_lazy') is not (os.environ['EXPECTED_LAZY'].lower() == 'true'):
+              raise SystemExit('unexpected lazy metadata')
           if metadata.get('health_check_max_failed_times') != int(os.environ['EXPECTED_HEALTH_MAX_FAILED_TIMES']):
               raise SystemExit('unexpected max-failed-times in metadata')
 
@@ -203,6 +207,9 @@ jobs:
                   raise SystemExit(f'proxy {index + 1} server does not match candidate metadata')
               if profile_port != proxies[index].get('port'):
                   raise SystemExit(f'proxy {index + 1} UDP port does not match candidate metadata')
+              stable_name = item.get('stable_proxy_name')
+              if stable_name != proxies[index].get('name'):
+                  raise SystemExit(f'proxy {index + 1} stable name does not match candidate metadata')
 
           lowest = groups[0]
           if not isinstance(lowest, dict) or lowest.get('name') != 'KR-LOWEST' or lowest.get('type') != 'url-test':
