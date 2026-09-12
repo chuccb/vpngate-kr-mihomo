@@ -22,13 +22,6 @@ DEFAULT_MAX_FAILED_TIMES = 2
 DEFAULT_TOLERANCE_MS = 5
 DEFAULT_LAZY = False
 
-optimized.SCRIPT_VERSION = SCRIPT_VERSION
-optimized.DEFAULT_TEST_URL = DEFAULT_TEST_URL
-optimized.DEFAULT_EXPECTED_STATUS = DEFAULT_EXPECTED_STATUS
-optimized.DEFAULT_HEALTH_INTERVAL = DEFAULT_HEALTH_INTERVAL
-optimized.DEFAULT_HEALTH_TIMEOUT_MS = DEFAULT_HEALTH_TIMEOUT_MS
-optimized.DEFAULT_MAX_FAILED_TIMES = DEFAULT_MAX_FAILED_TIMES
-
 _ORIGINAL_VALIDATE_CANDIDATE = optimized.validate_candidate
 _ORIGINAL_PARSE_OVPN = base.parse_ovpn
 
@@ -56,9 +49,6 @@ def validate_candidate_v73(row: dict[str, str]) -> tuple[base.Candidate | None, 
     except Exception as exc:
         return None, str(exc)
     return candidate, None
-
-
-optimized.validate_candidate = validate_candidate_v73
 
 
 def build_config_strict_v73(
@@ -272,9 +262,36 @@ def validate_config_v73(config: dict[str, Any]) -> None:
         raise RuntimeError("profile.store-selected must be enabled")
 
 
-optimized.build_config_strict = build_config_strict_v73
-optimized.write_metadata = write_metadata_v73
+def main() -> int:
+    # v7.2 is kept as the reusable acquisition/benchmark implementation. Apply
+    # v7.3 overrides only while its CLI is running, then restore every global so
+    # importing v7.3 cannot mutate v7.2 or its tests.
+    patched = {
+        "SCRIPT_VERSION": optimized.SCRIPT_VERSION,
+        "DEFAULT_TEST_URL": optimized.DEFAULT_TEST_URL,
+        "DEFAULT_EXPECTED_STATUS": optimized.DEFAULT_EXPECTED_STATUS,
+        "DEFAULT_HEALTH_INTERVAL": optimized.DEFAULT_HEALTH_INTERVAL,
+        "DEFAULT_HEALTH_TIMEOUT_MS": optimized.DEFAULT_HEALTH_TIMEOUT_MS,
+        "DEFAULT_MAX_FAILED_TIMES": optimized.DEFAULT_MAX_FAILED_TIMES,
+        "validate_candidate": optimized.validate_candidate,
+        "build_config_strict": optimized.build_config_strict,
+        "write_metadata": optimized.write_metadata,
+    }
+    optimized.SCRIPT_VERSION = SCRIPT_VERSION
+    optimized.DEFAULT_TEST_URL = DEFAULT_TEST_URL
+    optimized.DEFAULT_EXPECTED_STATUS = DEFAULT_EXPECTED_STATUS
+    optimized.DEFAULT_HEALTH_INTERVAL = DEFAULT_HEALTH_INTERVAL
+    optimized.DEFAULT_HEALTH_TIMEOUT_MS = DEFAULT_HEALTH_TIMEOUT_MS
+    optimized.DEFAULT_MAX_FAILED_TIMES = DEFAULT_MAX_FAILED_TIMES
+    optimized.validate_candidate = validate_candidate_v73
+    optimized.build_config_strict = build_config_strict_v73
+    optimized.write_metadata = write_metadata_v73
+    try:
+        return optimized.main()
+    finally:
+        for name, value in patched.items():
+            setattr(optimized, name, value)
 
 
 if __name__ == "__main__":
-    raise SystemExit(optimized.main())
+    raise SystemExit(main())
